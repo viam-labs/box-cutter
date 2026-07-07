@@ -172,6 +172,11 @@ class Control(Generic, EasyResource):
         images, _ = await self.camera.get_images()
         properties = await self.camera.get_properties()
         intr = properties.intrinsic_parameters
+        if not intr.focal_x_px or not intr.focal_y_px:
+            raise ValueError(
+                "camera returned no intrinsic parameters; cannot deproject "
+                "(configure the camera to emit intrinsics)"
+            )
 
         color_bgr, depth_np = decode_color_and_depth(images)
         if depth_np.shape[:2] != color_bgr.shape[:2]:
@@ -218,6 +223,8 @@ class Control(Generic, EasyResource):
         return result
 
     async def move_to_center(self) -> Mapping[str, ValueTypes]:
+        """Run find_center, then move the tool to the center; returns the
+        find_center payload plus a `moved` key (the accumulating dict is intentional)."""
         result = await self.find_center()
         if not result.get("found"):
             return result
@@ -235,6 +242,8 @@ class Control(Generic, EasyResource):
         return result
 
     async def full_cut(self) -> Mapping[str, ValueTypes]:
+        """Run move_to_center, then execute the slice sequence; returns the
+        move_to_center payload plus `completed`/`steps` (the accumulating dict is intentional)."""
         s = self.settings
         home = await self.motion.get_pose(
             component_name=s.arm_name, destination_frame=s.world_frame
@@ -251,6 +260,8 @@ class Control(Generic, EasyResource):
         steps = ["move_to_center"]
         top = result["cut_endpoints_world"]["top"]
         bottom = result["cut_endpoints_world"]["bottom"]
+        cut_z = bottom[2] - s.slice_depth_mm
+        lift_z = cut_z + s.lift_mm
 
         def down_pose(x, y, z):
             return PoseInFrame(
@@ -260,13 +271,13 @@ class Control(Generic, EasyResource):
 
         await self.motion.move(
             component_name=s.tool_frame,
-            destination=down_pose(bottom[0], bottom[1], bottom[2] - s.slice_depth_mm),
+            destination=down_pose(bottom[0], bottom[1], cut_z),
         )
         steps.append("plunge_bottom")
 
         await self.motion.move(
             component_name=s.tool_frame,
-            destination=down_pose(bottom[0], bottom[1], bottom[2] - s.slice_depth_mm + s.lift_mm),
+            destination=down_pose(bottom[0], bottom[1], lift_z),
         )
         steps.append("lift")
 
@@ -275,9 +286,11 @@ class Control(Generic, EasyResource):
         await self.arm.move_to_joint_positions(joints)
         steps.append("twist")
 
+        # Slice rides the same cut plane as the plunge (cut_z, derived from
+        # bottom[2]), not top[2] -- the seam is cut at a single consistent depth.
         await self.motion.move(
             component_name=s.tool_frame,
-            destination=down_pose(top[0], top[1], bottom[2] - s.slice_depth_mm),
+            destination=down_pose(top[0], top[1], cut_z),
             constraints=Constraints(
                 linear_constraint=[LinearConstraint(line_tolerance_mm=s.line_tolerance_mm)]
             ),
@@ -286,7 +299,7 @@ class Control(Generic, EasyResource):
 
         await self.motion.move(
             component_name=s.tool_frame,
-            destination=down_pose(top[0], top[1], bottom[2] - s.slice_depth_mm + s.lift_mm),
+            destination=down_pose(top[0], top[1], lift_z),
         )
         steps.append("lift")
 

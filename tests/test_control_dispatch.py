@@ -197,10 +197,35 @@ async def test_full_cut_runs_full_sequence():
     ctrl.arm = _FakeArm()
     out = await ctrl.do_command({"command": "full_cut"})
     assert out["completed"] is True
+    assert out["steps"] == [
+        "move_to_center", "plunge_bottom", "lift", "twist",
+        "slice_top", "lift", "untwist", "home",
+    ]
     assert ctrl.arm.joint_history[0][ctrl.settings.twist_joint_index] == ctrl.settings.twist_angle_deg
     assert ctrl.arm.joint_history[-1][ctrl.settings.twist_joint_index] == 0
-    assert len(ctrl.motion.moves) >= 5
-    assert any(c is not None for (_, _, c) in ctrl.motion.moves)
+
+    moves = ctrl.motion.moves
+    assert len(moves) == 6
+    # Exactly one constrained move: the slice at index 3.
+    for i, (_, _, c) in enumerate(moves):
+        if i == 3:
+            assert c is not None
+        else:
+            assert c is None
+
+    top = out["cut_endpoints_world"]["top"]
+    bottom = out["cut_endpoints_world"]["bottom"]
+    cut_z = bottom[2] - ctrl.settings.slice_depth_mm
+
+    # Slice move (index 3) targets top x,y at the cut plane.
+    assert moves[3][1].pose.x == pytest.approx(top[0])
+    assert moves[3][1].pose.y == pytest.approx(top[1])
+    assert moves[3][1].pose.z == pytest.approx(cut_z)
+
+    # Plunge move (index 1) targets bottom x,y at the cut plane.
+    assert moves[1][1].pose.x == pytest.approx(bottom[0])
+    assert moves[1][1].pose.y == pytest.approx(bottom[1])
+    assert moves[1][1].pose.z == pytest.approx(cut_z)
 
 
 @pytest.mark.asyncio
@@ -218,3 +243,41 @@ async def test_full_cut_aborts_when_no_box():
     out = await ctrl.do_command({"command": "full_cut"})
     assert out["found"] is False
     assert ctrl.arm.joint_history == []
+
+
+class _NoIntr:
+    focal_x_px = 0.0
+    focal_y_px = 0.0
+    center_x_px = 320.0
+    center_y_px = 240.0
+
+
+class _NoIntrProps:
+    intrinsic_parameters = _NoIntr()
+
+
+class _NoIntrCamera(_FakeCamera):
+    async def get_properties(self):
+        return _NoIntrProps()
+
+
+@pytest.mark.asyncio
+async def test_find_center_raises_on_depth_color_mismatch():
+    ctrl = _make_control()
+    bgr = np.full((480, 640, 3), 128, dtype=np.uint8)
+    ok, buf = cv2.imencode(".jpg", bgr)
+    depth = np.full((240, 320), 700, dtype=np.uint16)  # mismatched resolution
+    ctrl.camera = _FakeCamera([
+        _NamedImage(CameraMimeType.JPEG, data=buf.tobytes()),
+        _NamedImage(CameraMimeType.VIAM_RAW_DEPTH, depth=depth),
+    ])
+    with pytest.raises(ValueError, match="not aligned"):
+        await ctrl.do_command({"command": "find_center"})
+
+
+@pytest.mark.asyncio
+async def test_find_center_raises_without_intrinsics():
+    ctrl = _make_control()
+    ctrl.camera = _NoIntrCamera(_images_with_box())
+    with pytest.raises(ValueError, match="intrinsic"):
+        await ctrl.do_command({"command": "find_center"})
