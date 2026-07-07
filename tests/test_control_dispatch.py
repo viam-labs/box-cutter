@@ -116,3 +116,41 @@ async def test_do_command_missing_command_raises():
     ctrl = _make_control()
     with pytest.raises(ValueError):
         await ctrl.do_command({})
+
+
+class _RecordingMotion(_FakeMotion):
+    def __init__(self):
+        self.moved = None
+    async def move(self, component_name, destination, **kw):
+        self.moved = (component_name, destination)
+        return True
+
+
+@pytest.mark.asyncio
+async def test_move_to_center_commands_move_to_world_center():
+    ctrl = _make_control()
+    ctrl.motion = _RecordingMotion()
+    out = await ctrl.do_command({"command": "move_to_center"})
+    assert out["found"] is True
+    assert out["moved"] is True
+    comp, dest = ctrl.motion.moved
+    assert comp == "tool"
+    assert dest.reference_frame == "world"
+    assert dest.pose.z == pytest.approx(700.0 - 4.0, abs=1)
+    assert dest.pose.o_z == -1
+
+
+@pytest.mark.asyncio
+async def test_move_to_center_skips_move_when_not_found():
+    ctrl = _make_control()
+    ctrl.motion = _RecordingMotion()
+    blank = np.full((480, 640, 3), 128, dtype=np.uint8)
+    ok, buf = cv2.imencode(".jpg", blank)
+    depth = np.full((480, 640), 700, dtype=np.uint16)
+    ctrl.camera = _FakeCamera([
+        _NamedImage(CameraMimeType.JPEG, data=buf.tobytes()),
+        _NamedImage(CameraMimeType.VIAM_RAW_DEPTH, depth=depth),
+    ])
+    out = await ctrl.do_command({"command": "move_to_center"})
+    assert out["found"] is False
+    assert ctrl.motion.moved is None

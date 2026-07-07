@@ -217,6 +217,23 @@ class Control(Generic, EasyResource):
             }
         return result
 
+    async def move_to_center(self) -> Mapping[str, ValueTypes]:
+        result = await self.find_center()
+        if not result.get("found"):
+            return result
+        s = self.settings
+        w = result["world_pose"]
+        goal = PoseInFrame(
+            reference_frame=s.world_frame,
+            pose=Pose(
+                x=w["x"], y=w["y"], z=w["z"] - s.plunge_depth_mm,
+                o_x=0, o_y=0, o_z=-1, theta=0,
+            ),
+        )
+        await self.motion.move(component_name=s.tool_frame, destination=goal)
+        result["moved"] = True
+        return result
+
     async def _endpoint_world(self, px, z, intr):
         ex, ey, ez = deproject(px[0], px[1], z, intr)
         pif = await self._to_frame((ex, ey, ez), self.settings.world_frame)
