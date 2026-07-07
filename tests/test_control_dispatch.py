@@ -154,3 +154,67 @@ async def test_move_to_center_skips_move_when_not_found():
     out = await ctrl.do_command({"command": "move_to_center"})
     assert out["found"] is False
     assert ctrl.motion.moved is None
+
+
+from viam.proto.common import Pose as _Pose
+
+
+class _FakeJointPositions:
+    def __init__(self, values):
+        self.values = list(values)
+
+
+class _FakeArm:
+    def __init__(self):
+        self.joint_history = []
+    async def get_joint_positions(self, **kw):
+        return _FakeJointPositions([0, 0, 0, 0, 0, 0])
+    async def move_to_joint_positions(self, positions, **kw):
+        self.joint_history.append(list(positions.values))
+
+
+class _FullCutMotion(_RecordingMotion):
+    def __init__(self):
+        super().__init__()
+        self.moves = []
+        self._home = PoseInFrame(
+            reference_frame="world",
+            pose=_Pose(x=1, y=2, z=3, o_x=0, o_y=0, o_z=-1, theta=0),
+        )
+    async def move(self, component_name, destination, **kw):
+        self.moves.append((component_name, destination, kw.get("constraints")))
+        return True
+    async def get_pose(self, component_name, destination_frame, supplemental_transforms=None, **kw):
+        if supplemental_transforms is None:
+            return self._home
+        return await super().get_pose(component_name, destination_frame, supplemental_transforms)
+
+
+@pytest.mark.asyncio
+async def test_full_cut_runs_full_sequence():
+    ctrl = _make_control()
+    ctrl.motion = _FullCutMotion()
+    ctrl.arm = _FakeArm()
+    out = await ctrl.do_command({"command": "full_cut"})
+    assert out["completed"] is True
+    assert ctrl.arm.joint_history[0][ctrl.settings.twist_joint_index] == ctrl.settings.twist_angle_deg
+    assert ctrl.arm.joint_history[-1][ctrl.settings.twist_joint_index] == 0
+    assert len(ctrl.motion.moves) >= 5
+    assert any(c is not None for (_, _, c) in ctrl.motion.moves)
+
+
+@pytest.mark.asyncio
+async def test_full_cut_aborts_when_no_box():
+    ctrl = _make_control()
+    ctrl.motion = _FullCutMotion()
+    ctrl.arm = _FakeArm()
+    blank = np.full((480, 640, 3), 128, dtype=np.uint8)
+    ok, buf = cv2.imencode(".jpg", blank)
+    depth = np.full((480, 640), 700, dtype=np.uint16)
+    ctrl.camera = _FakeCamera([
+        _NamedImage(CameraMimeType.JPEG, data=buf.tobytes()),
+        _NamedImage(CameraMimeType.VIAM_RAW_DEPTH, depth=depth),
+    ])
+    out = await ctrl.do_command({"command": "full_cut"})
+    assert out["found"] is False
+    assert ctrl.arm.joint_history == []

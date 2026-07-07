@@ -234,6 +234,74 @@ class Control(Generic, EasyResource):
         result["moved"] = True
         return result
 
+    async def full_cut(self) -> Mapping[str, ValueTypes]:
+        s = self.settings
+        home = await self.motion.get_pose(
+            component_name=s.arm_name, destination_frame=s.world_frame
+        )
+
+        result = await self.move_to_center()
+        if not result.get("found"):
+            return result
+        if "cut_endpoints_world" not in result:
+            result["completed"] = False
+            result["reason"] = "no seam/cut endpoints detected; only moved to center"
+            return result
+
+        steps = ["move_to_center"]
+        top = result["cut_endpoints_world"]["top"]
+        bottom = result["cut_endpoints_world"]["bottom"]
+
+        def down_pose(x, y, z):
+            return PoseInFrame(
+                reference_frame=s.world_frame,
+                pose=Pose(x=x, y=y, z=z, o_x=0, o_y=0, o_z=-1, theta=0),
+            )
+
+        await self.motion.move(
+            component_name=s.tool_frame,
+            destination=down_pose(bottom[0], bottom[1], bottom[2] - s.slice_depth_mm),
+        )
+        steps.append("plunge_bottom")
+
+        await self.motion.move(
+            component_name=s.tool_frame,
+            destination=down_pose(bottom[0], bottom[1], bottom[2] - s.slice_depth_mm + s.lift_mm),
+        )
+        steps.append("lift")
+
+        joints = await self.arm.get_joint_positions()
+        joints.values[s.twist_joint_index] = s.twist_angle_deg
+        await self.arm.move_to_joint_positions(joints)
+        steps.append("twist")
+
+        await self.motion.move(
+            component_name=s.tool_frame,
+            destination=down_pose(top[0], top[1], bottom[2] - s.slice_depth_mm),
+            constraints=Constraints(
+                linear_constraint=[LinearConstraint(line_tolerance_mm=s.line_tolerance_mm)]
+            ),
+        )
+        steps.append("slice_top")
+
+        await self.motion.move(
+            component_name=s.tool_frame,
+            destination=down_pose(top[0], top[1], bottom[2] - s.slice_depth_mm + s.lift_mm),
+        )
+        steps.append("lift")
+
+        joints = await self.arm.get_joint_positions()
+        joints.values[s.twist_joint_index] = 0
+        await self.arm.move_to_joint_positions(joints)
+        steps.append("untwist")
+
+        await self.motion.move(component_name=s.arm_name, destination=home)
+        steps.append("home")
+
+        result["completed"] = True
+        result["steps"] = steps
+        return result
+
     async def _endpoint_world(self, px, z, intr):
         ex, ey, ez = deproject(px[0], px[1], z, intr)
         pif = await self._to_frame((ex, ey, ez), self.settings.world_frame)
