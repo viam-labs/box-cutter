@@ -30,6 +30,15 @@ def test_deproject_offset_pixel():
     assert z == 1000.0
 
 
+def test_deproject_uses_independent_y_and_focal_y():
+    intr = _Intr(fx=600.0, fy=400.0, cx=320.0, cy=240.0)
+    u, v, z = 320 + 60, 240 + 40, 1000.0
+    x, y, z_out = deproject(u, v, z, intr)
+    assert x == pytest.approx((u - 320.0) * z / 600.0)
+    assert y == pytest.approx((v - 240.0) * z / 400.0)
+    assert z_out == 1000.0
+
+
 from models.detection import inset_endpoints
 
 
@@ -164,3 +173,21 @@ def test_find_seam_edges_none_on_empty_mask():
     mask = np.zeros((480, 640), dtype=np.uint8)
     bgr = np.zeros((480, 640, 3), dtype=np.uint8)
     assert find_seam_edges(mask, (320, 240), bgr) is None
+
+
+def test_find_seam_edges_falls_back_to_longer_axis_without_dark_seam():
+    h, w = 480, 640
+    bgr = np.full((h, w, 3), 128, dtype=np.uint8)
+    # Plain tan rectangle, no dark seam: 240 wide x 120 tall (clearly non-square).
+    x0, y0, bw, bh = 200, 180, 240, 120
+    bgr[y0:y0 + bh, x0:x0 + bw] = (60, 140, 200)
+    _, _, mask = detect_box_center(bgr)
+    assert mask is not None
+    center = (x0 + bw // 2, y0 + bh // 2)
+    result = find_seam_edges(mask, center, bgr)
+    assert result is not None
+    top_px, bottom_px, angle_deg = result
+    # No dark pixels -> the length fallback picks the clearly-longer (horizontal) axis.
+    dx = abs(top_px[0] - bottom_px[0])
+    dy = abs(top_px[1] - bottom_px[1])
+    assert dx > dy

@@ -5,7 +5,7 @@ Control service passes configured tuning values in; the module-level constants
 below are only defaults, matching the original script.
 """
 
-from typing import Optional, Sequence, Tuple
+from typing import Sequence
 
 import cv2
 import numpy as np
