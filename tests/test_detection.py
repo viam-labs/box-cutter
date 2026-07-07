@@ -1,5 +1,8 @@
+import cv2
 import numpy as np
 import pytest
+
+from viam.media.video import CameraMimeType
 
 from models.detection import deproject
 
@@ -55,3 +58,51 @@ def test_sample_depth_returns_none_when_all_invalid():
     depth = np.zeros((2, 2), dtype=np.uint16)
     mask = np.full((2, 2), 255, dtype=np.uint8)
     assert sample_depth_in_mask(depth, mask) is None
+
+
+from models.detection import decode_color_and_depth
+
+
+class _FakeNamedImage:
+    """Enough of NamedImage for decode_color_and_depth."""
+    def __init__(self, mime_type, data=b"", depth=None):
+        self.mime_type = mime_type
+        self.data = data
+        self._depth = depth
+
+    def bytes_to_depth_array(self):
+        return self._depth
+
+
+def _jpeg_bytes(bgr):
+    ok, buf = cv2.imencode(".jpg", bgr)
+    assert ok
+    return buf.tobytes()
+
+
+def test_decode_color_and_depth_splits_streams():
+    bgr = np.zeros((4, 4, 3), dtype=np.uint8)
+    bgr[:] = (0, 0, 200)
+    depth = np.full((4, 4), 500, dtype=np.uint16)
+    images = [
+        _FakeNamedImage(CameraMimeType.JPEG, data=_jpeg_bytes(bgr)),
+        _FakeNamedImage(CameraMimeType.VIAM_RAW_DEPTH, depth=depth),
+    ]
+    color_out, depth_out = decode_color_and_depth(images)
+    assert color_out.shape == (4, 4, 3)
+    assert depth_out.shape == (4, 4)
+    assert depth_out.dtype == np.uint16
+
+
+def test_decode_raises_without_color():
+    depth = np.full((4, 4), 500, dtype=np.uint16)
+    images = [_FakeNamedImage(CameraMimeType.VIAM_RAW_DEPTH, depth=depth)]
+    with pytest.raises(ValueError, match="color"):
+        decode_color_and_depth(images)
+
+
+def test_decode_raises_without_depth():
+    bgr = np.zeros((4, 4, 3), dtype=np.uint8)
+    images = [_FakeNamedImage(CameraMimeType.JPEG, data=_jpeg_bytes(bgr))]
+    with pytest.raises(ValueError, match="depth"):
+        decode_color_and_depth(images)
