@@ -5,13 +5,23 @@ from typing_extensions import Self
 from viam.components.arm import Arm
 from viam.components.camera import Camera
 from viam.proto.app.robot import ComponentConfig
-from viam.proto.common import ResourceName
+from viam.proto.common import Pose, PoseInFrame, ResourceName, Transform
 from viam.resource.base import ResourceBase
 from viam.resource.easy_resource import EasyResource
 from viam.resource.types import Model, ModelFamily
 from viam.services.generic import Generic
-from viam.services.motion import MotionClient
+from viam.services.motion import Constraints, MotionClient
+from viam.proto.service.motion import LinearConstraint
 from viam.utils import ValueTypes
+
+from models.detection import (
+    decode_color_and_depth,
+    deproject,
+    detect_box_center,
+    find_seam_edges,
+    inset_endpoints,
+    sample_depth_in_mask,
+)
 
 
 def _str(config: ComponentConfig, key: str, default: Optional[str] = None) -> Optional[str]:
@@ -36,6 +46,14 @@ def _triple(config: ComponentConfig, key: str, default: Tuple[int, int, int]) ->
             raise ValueError(f"'{key}' must have exactly 3 numbers")
         return (vals[0], vals[1], vals[2])
     return default
+
+
+def _pose_to_dict(pose) -> dict:
+    return {
+        "x": float(pose.x), "y": float(pose.y), "z": float(pose.z),
+        "o_x": float(pose.o_x), "o_y": float(pose.o_y), "o_z": float(pose.o_z),
+        "theta": float(pose.theta),
+    }
 
 
 @dataclass
@@ -138,7 +156,87 @@ class Control(Generic, EasyResource):
         timeout: Optional[float] = None,
         **kwargs,
     ) -> Mapping[str, ValueTypes]:
-        raise NotImplementedError()
+        name = command.get("command")
+        if not name:
+            raise ValueError("do_command requires a 'command' key")
+        if name == "find_center":
+            return await self.find_center()
+        if name == "move_to_center":
+            return await self.move_to_center()
+        if name == "full_cut":
+            return await self.full_cut()
+        raise ValueError(f"unknown command: {name!r}")
+
+    async def find_center(self) -> Mapping[str, ValueTypes]:
+        s = self.settings
+        images, _ = await self.camera.get_images()
+        properties = await self.camera.get_properties()
+        intr = properties.intrinsic_parameters
+
+        color_bgr, depth_np = decode_color_and_depth(images)
+        if depth_np.shape[:2] != color_bgr.shape[:2]:
+            raise ValueError(
+                f"depth {depth_np.shape[:2]} not aligned to color "
+                f"{color_bgr.shape[:2]}; cannot deproject with color intrinsics"
+            )
+
+        u, v, mask = detect_box_center(color_bgr, s.hsv_lower, s.hsv_upper, s.min_box_area)
+        if u is None:
+            return {"found": False, "reason": "no box-colored region found"}
+
+        z = sample_depth_in_mask(depth_np, mask)
+        if z is None:
+            return {"found": False, "reason": "no valid depth in box mask"}
+
+        cx, cy, cz = deproject(u, v, z, intr)
+        world = await self._to_frame((cx, cy, cz), s.world_frame)
+
+        result = {
+            "found": True,
+            "u": int(u),
+            "v": int(v),
+            "depth_mm": float(z),
+            "camera_frame_xyz": {"x": float(cx), "y": float(cy), "z": float(cz)},
+            "world_pose": _pose_to_dict(world.pose),
+        }
+
+        seam = find_seam_edges(mask, (u, v), color_bgr, s.seam_dark_v_max, s.min_seam_len_px)
+        if seam is not None:
+            top_px, bottom_px, angle_deg = seam
+            top_w = await self._endpoint_world(top_px, z, intr)
+            bottom_w = await self._endpoint_world(bottom_px, z, intr)
+            top_inset, bottom_inset = inset_endpoints(top_w, bottom_w, s.inset_mm)
+            result["seam"] = {
+                "top_px": [int(top_px[0]), int(top_px[1])],
+                "bottom_px": [int(bottom_px[0]), int(bottom_px[1])],
+                "angle_deg": float(angle_deg),
+            }
+            result["cut_endpoints_world"] = {
+                "top": [float(c) for c in top_inset],
+                "bottom": [float(c) for c in bottom_inset],
+            }
+        return result
+
+    async def _endpoint_world(self, px, z, intr):
+        ex, ey, ez = deproject(px[0], px[1], z, intr)
+        pif = await self._to_frame((ex, ey, ez), self.settings.world_frame)
+        return (pif.pose.x, pif.pose.y, pif.pose.z)
+
+    async def _to_frame(self, point_xyz, dest_frame):
+        """Transform a camera-frame point (mm) into dest_frame via the motion service."""
+        x, y, z = point_xyz
+        transform = Transform(
+            reference_frame="box_point",
+            pose_in_observer_frame=PoseInFrame(
+                reference_frame=self.settings.camera_frame,
+                pose=Pose(x=x, y=y, z=z, o_x=0, o_y=0, o_z=1, theta=0),
+            ),
+        )
+        return await self.motion.get_pose(
+            component_name="box_point",
+            destination_frame=dest_frame,
+            supplemental_transforms=[transform],
+        )
 
     async def get_status(
         self, *, timeout: Optional[float] = None, **kwargs
