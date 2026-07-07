@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass
 from typing import ClassVar, Mapping, Optional, Sequence, Tuple
 
@@ -12,6 +13,7 @@ from viam.resource.types import Model, ModelFamily
 from viam.services.generic import Generic
 from viam.services.motion import Constraints, MotionClient
 from viam.proto.service.motion import LinearConstraint
+from viam.robot.client import RobotClient
 from viam.utils import ValueTypes
 
 from models.detection import (
@@ -24,7 +26,17 @@ from models.detection import (
 )
 
 
-def _str(config: ComponentConfig, key: str, default: Optional[str] = None) -> Optional[str]:
+async def create_robot_client_from_module():
+    opts = RobotClient.Options.with_api_key(
+        api_key=os.environ["VIAM_API_KEY"],
+        api_key_id=os.environ["VIAM_API_KEY_ID"],
+    )
+    return await RobotClient.at_address(os.environ["VIAM_MACHINE_FQDN"], opts)
+
+
+def _str(
+    config: ComponentConfig, key: str, default: Optional[str] = None
+) -> Optional[str]:
     fields = config.attributes.fields
     if key in fields and fields[key].string_value:
         return fields[key].string_value
@@ -38,7 +50,9 @@ def _num(config: ComponentConfig, key: str, default):
     return default
 
 
-def _triple(config: ComponentConfig, key: str, default: Tuple[int, int, int]) -> Tuple[int, int, int]:
+def _triple(
+    config: ComponentConfig, key: str, default: Tuple[int, int, int]
+) -> Tuple[int, int, int]:
     fields = config.attributes.fields
     if key in fields and fields[key].HasField("list_value"):
         vals = [int(v.number_value) for v in fields[key].list_value.values]
@@ -50,8 +64,12 @@ def _triple(config: ComponentConfig, key: str, default: Tuple[int, int, int]) ->
 
 def _pose_to_dict(pose) -> dict:
     return {
-        "x": float(pose.x), "y": float(pose.y), "z": float(pose.z),
-        "o_x": float(pose.o_x), "o_y": float(pose.o_y), "o_z": float(pose.o_z),
+        "x": float(pose.x),
+        "y": float(pose.y),
+        "z": float(pose.z),
+        "o_x": float(pose.o_x),
+        "o_y": float(pose.o_y),
+        "o_z": float(pose.o_z),
         "theta": float(pose.theta),
     }
 
@@ -117,7 +135,9 @@ class Control(Generic, EasyResource):
     def new(
         cls, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
     ) -> Self:
-        return super().new(config, dependencies)
+        cls = super().new(config, dependencies)
+        cls.reconfigure(config, dependencies)
+        return cls
 
     @classmethod
     def validate_config(
@@ -148,6 +168,7 @@ class Control(Generic, EasyResource):
         self.motion: MotionClient = self._resolve(
             dependencies, MotionClient.get_resource_name(settings.motion_name)
         )
+        self.robot_client = None
 
     async def do_command(
         self,
@@ -185,7 +206,9 @@ class Control(Generic, EasyResource):
                 f"{color_bgr.shape[:2]}; cannot deproject with color intrinsics"
             )
 
-        u, v, mask = detect_box_center(color_bgr, s.hsv_lower, s.hsv_upper, s.min_box_area)
+        u, v, mask = detect_box_center(
+            color_bgr, s.hsv_lower, s.hsv_upper, s.min_box_area
+        )
         if u is None:
             return {"found": False, "reason": "no box-colored region found"}
 
@@ -205,7 +228,9 @@ class Control(Generic, EasyResource):
             "world_pose": _pose_to_dict(world.pose),
         }
 
-        seam = find_seam_edges(mask, (u, v), color_bgr, s.seam_dark_v_max, s.min_seam_len_px)
+        seam = find_seam_edges(
+            mask, (u, v), color_bgr, s.seam_dark_v_max, s.min_seam_len_px
+        )
         if seam is not None:
             top_px, bottom_px, angle_deg = seam
             top_w = await self._endpoint_world(top_px, z, intr)
@@ -233,8 +258,13 @@ class Control(Generic, EasyResource):
         goal = PoseInFrame(
             reference_frame=s.world_frame,
             pose=Pose(
-                x=w["x"], y=w["y"], z=w["z"] - s.plunge_depth_mm,
-                o_x=0, o_y=0, o_z=-1, theta=0,
+                x=w["x"],
+                y=w["y"],
+                z=w["z"] - s.plunge_depth_mm,
+                o_x=0,
+                o_y=0,
+                o_z=-1,
+                theta=0,
             ),
         )
         await self.motion.move(component_name=s.tool_frame, destination=goal)
@@ -301,7 +331,9 @@ class Control(Generic, EasyResource):
             component_name=s.tool_frame,
             destination=down_pose(top[0], top[1], cut_z),
             constraints=Constraints(
-                linear_constraint=[LinearConstraint(line_tolerance_mm=s.line_tolerance_mm)]
+                linear_constraint=[
+                    LinearConstraint(line_tolerance_mm=s.line_tolerance_mm)
+                ]
             ),
         )
         steps.append("slice_top")
@@ -331,22 +363,23 @@ class Control(Generic, EasyResource):
 
     async def _to_frame(self, point_xyz, dest_frame):
         """Transform a camera-frame point (mm) into dest_frame via the motion service."""
+        if not self.robot_client:
+            self.robot_client = await create_robot_client_from_module()
+
         x, y, z = point_xyz
-        transform = Transform(
-            reference_frame="box_point",
-            pose_in_observer_frame=PoseInFrame(
-                reference_frame=self.settings.camera_frame,
-                pose=Pose(x=x, y=y, z=z, o_x=0, o_y=0, o_z=1, theta=0),
-            ),
+        observer_pose = PoseInFrame(
+            reference_frame=self.settings.camera_frame,
+            pose=Pose(x=x, y=y, z=z, o_x=0, o_y=0, o_z=1, theta=0),
         )
-        return await self.motion.get_pose(
-            component_name="box_point",
-            destination_frame=dest_frame,
-            supplemental_transforms=[transform],
-        )
+        return await self.robot_client.transform_pose(observer_pose, dest_frame)
 
     async def get_status(
         self, *, timeout: Optional[float] = None, **kwargs
     ) -> Mapping[str, ValueTypes]:
         self.logger.error("`get_status` is not implemented")
         raise NotImplementedError()
+
+    async def close(self):
+        if self.robot_client:
+            self.robot_client.close()
+            self.robot_client = None
