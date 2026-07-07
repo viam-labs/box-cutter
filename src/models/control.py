@@ -249,6 +249,15 @@ class Control(Generic, EasyResource):
             component_name=s.arm_name, destination_frame=s.world_frame
         )
 
+        # Validate the twist index before any motion, so we never park the tool
+        # mid-cut (post-plunge) only to throw on an out-of-range list index.
+        joints = await self.arm.get_joint_positions()
+        if not (0 <= s.twist_joint_index < len(joints.values)):
+            raise ValueError(
+                f"twist_joint_index {s.twist_joint_index} out of range for arm with "
+                f"{len(joints.values)} joints"
+            )
+
         result = await self.move_to_center()
         if not result.get("found"):
             return result

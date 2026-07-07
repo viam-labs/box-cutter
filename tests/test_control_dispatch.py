@@ -281,3 +281,15 @@ async def test_find_center_raises_without_intrinsics():
     ctrl.camera = _NoIntrCamera(_images_with_box())
     with pytest.raises(ValueError, match="intrinsic"):
         await ctrl.do_command({"command": "find_center"})
+
+
+@pytest.mark.asyncio
+async def test_full_cut_rejects_out_of_range_twist_index():
+    ctrl = _make_control()
+    ctrl.motion = _FullCutMotion()
+    ctrl.arm = _FakeArm()
+    ctrl.settings.twist_joint_index = 6  # out of range for a 6-joint arm (valid 0-5)
+    with pytest.raises(ValueError, match="out of range"):
+        await ctrl.do_command({"command": "full_cut"})
+    assert ctrl.motion.moves == []
+    assert ctrl.arm.joint_history == []
