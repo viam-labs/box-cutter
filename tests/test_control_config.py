@@ -1,7 +1,9 @@
 import pytest
 from google.protobuf.struct_pb2 import Struct
+from viam.components.arm import Arm
 from viam.components.camera import Camera
 from viam.proto.app.robot import ComponentConfig
+from viam.services.motion import MotionClient
 
 from models.control import Control, Settings
 
@@ -64,6 +66,12 @@ def test_settings_from_config_overrides_tuning():
     assert s.hsv_upper == (4, 5, 6)
 
 
+def test_settings_rejects_wrong_length_hsv():
+    cfg = _config({"camera": "c", "arm": "a", "tool_frame": "t", "hsv_lower": [1, 2]})
+    with pytest.raises(ValueError, match="exactly 3"):
+        Settings.from_config(cfg)
+
+
 class _FakeCam(Camera):
     async def get_images(self, *a, **k): ...
     async def get_image(self, *a, **k): ...
@@ -81,3 +89,32 @@ def test_resolve_returns_matching_dependency():
 def test_resolve_raises_on_missing_dependency():
     with pytest.raises(ValueError, match="missing required dependency"):
         Control._resolve({}, Camera.get_resource_name("cam"))
+
+
+def test_reconfigure_wires_up_resolved_dependencies():
+    ctrl = Control.__new__(Control)
+    cam_obj, arm_obj, motion_obj = object(), object(), object()
+    deps = {
+        Camera.get_resource_name("cam"): cam_obj,
+        Arm.get_resource_name("arm"): arm_obj,
+        MotionClient.get_resource_name("builtin"): motion_obj,
+    }
+    ctrl.reconfigure(
+        _config({"camera": "cam", "arm": "arm", "tool_frame": "tool"}), deps
+    )
+    assert ctrl.camera is cam_obj
+    assert ctrl.arm is arm_obj
+    assert ctrl.motion is motion_obj
+    assert ctrl.settings.tool_frame == "tool"
+
+
+def test_reconfigure_raises_on_missing_dependency():
+    ctrl = Control.__new__(Control)
+    deps = {
+        Camera.get_resource_name("cam"): object(),
+        MotionClient.get_resource_name("builtin"): object(),
+    }
+    with pytest.raises(ValueError, match="missing required dependency"):
+        ctrl.reconfigure(
+            _config({"camera": "cam", "arm": "arm", "tool_frame": "tool"}), deps
+        )

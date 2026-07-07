@@ -121,13 +121,13 @@ class Control(Generic, EasyResource):
     ) -> None:
         settings = Settings.from_config(config)
         self.settings = settings
-        self.camera = self._resolve(
+        self.camera: Camera = self._resolve(
             dependencies, Camera.get_resource_name(settings.camera_name)
         )
-        self.arm = self._resolve(
+        self.arm: Arm = self._resolve(
             dependencies, Arm.get_resource_name(settings.arm_name)
         )
-        self.motion = self._resolve(
+        self.motion: MotionClient = self._resolve(
             dependencies, MotionClient.get_resource_name(settings.motion_name)
         )
 
