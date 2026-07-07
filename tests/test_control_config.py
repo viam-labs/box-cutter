@@ -1,5 +1,6 @@
 import pytest
 from google.protobuf.struct_pb2 import Struct
+from viam.components.camera import Camera
 from viam.proto.app.robot import ComponentConfig
 
 from models.control import Control, Settings
@@ -61,3 +62,22 @@ def test_settings_from_config_overrides_tuning():
     assert s.plunge_depth_mm == 7
     assert s.hsv_lower == (1, 2, 3)
     assert s.hsv_upper == (4, 5, 6)
+
+
+class _FakeCam(Camera):
+    async def get_images(self, *a, **k): ...
+    async def get_image(self, *a, **k): ...
+    async def get_point_cloud(self, *a, **k): ...
+    async def get_properties(self, *a, **k): ...
+    async def do_command(self, *a, **k): ...
+
+
+def test_resolve_returns_matching_dependency():
+    cam = _FakeCam("cam")
+    deps = {Camera.get_resource_name("cam"): cam}
+    assert Control._resolve(deps, Camera.get_resource_name("cam")) is cam
+
+
+def test_resolve_raises_on_missing_dependency():
+    with pytest.raises(ValueError, match="missing required dependency"):
+        Control._resolve({}, Camera.get_resource_name("cam"))
