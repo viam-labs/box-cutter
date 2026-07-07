@@ -40,3 +40,18 @@ def test_inset_endpoints_collapses_when_too_short():
     top, bottom = inset_endpoints((0.0, 0.0, 0.0), (10.0, 0.0, 0.0), inset_mm=8)
     assert top == pytest.approx((5.0, 0.0, 0.0))
     assert bottom == pytest.approx((5.0, 0.0, 0.0))
+
+
+from models.detection import sample_depth_in_mask
+
+
+def test_sample_depth_median_ignores_zeros():
+    depth = np.array([[0, 1000], [2000, 3000]], dtype=np.uint16)
+    mask = np.array([[255, 255], [255, 255]], dtype=np.uint8)
+    assert sample_depth_in_mask(depth, mask) == pytest.approx(2000.0)
+
+
+def test_sample_depth_returns_none_when_all_invalid():
+    depth = np.zeros((2, 2), dtype=np.uint16)
+    mask = np.full((2, 2), 255, dtype=np.uint8)
+    assert sample_depth_in_mask(depth, mask) is None

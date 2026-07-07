@@ -42,3 +42,17 @@ def inset_endpoints(top_xyz, bottom_xyz, inset_mm=INSET_MM):
         return mid, mid
     u = span / length
     return tuple(t + u * inset_mm), tuple(b - u * inset_mm)
+
+
+def sample_depth_in_mask(depth_np, mask):
+    """Median valid depth (mm) over the box mask, or None if none is available.
+
+    Sampling across the whole box top (not just the centroid pixel) is robust to
+    the RealSense dropping depth to 0 on glossy/dark spots (e.g. the tape seam,
+    which is exactly where the box centroid tends to land).
+    """
+    region = depth_np[mask > 0]
+    valid = region[region > 0]
+    if valid.size == 0:
+        return None
+    return float(np.median(valid))
