@@ -139,3 +139,28 @@ def test_detect_box_center_none_when_no_box_color():
     bgr = np.full((480, 640, 3), 128, dtype=np.uint8)
     cx, cy, mask = detect_box_center(bgr)
     assert cx is None and cy is None and mask is None
+
+
+from models.detection import find_seam_edges
+
+
+def test_find_seam_edges_returns_endpoints_along_dark_seam():
+    h, w = 480, 640
+    bgr = np.full((h, w, 3), 128, dtype=np.uint8)
+    bgr[140:340, 240:400] = (60, 140, 200)     # tan box
+    bgr[140:340, 316:324] = (10, 10, 10)        # dark vertical seam
+    _, _, mask = detect_box_center(bgr)
+    assert mask is not None
+    center = (320, 240)
+    result = find_seam_edges(mask, center, bgr)
+    assert result is not None
+    top_px, bottom_px, angle_deg = result
+    assert abs(top_px[0] - center[0]) <= 10
+    assert abs(bottom_px[0] - center[0]) <= 10
+    assert abs(top_px[1] - bottom_px[1]) > 50
+
+
+def test_find_seam_edges_none_on_empty_mask():
+    mask = np.zeros((480, 640), dtype=np.uint8)
+    bgr = np.zeros((480, 640, 3), dtype=np.uint8)
+    assert find_seam_edges(mask, (320, 240), bgr) is None

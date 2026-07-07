@@ -112,3 +112,57 @@ def detect_box_center(
     box_mask = np.zeros(mask.shape, dtype=np.uint8)
     cv2.drawContours(box_mask, [largest], -1, 255, thickness=cv2.FILLED)
     return cX, cY, box_mask
+
+
+def _pick_seam_axis(bgr, mask, a0, a1, dark_v_max):
+    """Pick which rect axis the seam runs along. a0/a1 = (unit_vec, length)."""
+    v = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)[:, :, 2]
+    dark = (v < dark_v_max) & (mask > 0)
+    ys, xs = np.nonzero(dark)
+    if xs.size >= 20:
+        pts = np.column_stack([xs, ys]).astype(np.float32)
+        if (pts @ a0[0]).var() >= (pts @ a1[0]).var():
+            return a0
+        return a1
+    if abs(a0[1] - a1[1]) > 0.15 * max(a0[1], a1[1]):
+        return a0 if a0[1] >= a1[1] else a1
+    return a0 if abs(a0[0][1]) >= abs(a1[0][1]) else a1
+
+
+def find_seam_edges(
+    mask,
+    center,
+    bgr,
+    dark_v_max=SEAM_DARK_V_MAX,
+    min_seam_len_px=MIN_SEAM_LEN_PX,
+):
+    """Top/bottom seam-edge pixels from the box mask, along the seam axis.
+
+    Returns (top_px, bottom_px, angle_deg) -- endpoints at the midpoints of the
+    two box edges the seam crosses -- or None if no plausible seam is found.
+    """
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    contour = max(contours, key=cv2.contourArea)
+
+    box_pts = cv2.boxPoints(cv2.minAreaRect(contour))
+    e0 = box_pts[1] - box_pts[0]
+    e1 = box_pts[3] - box_pts[0]
+    len0, len1 = float(np.linalg.norm(e0)), float(np.linalg.norm(e1))
+    if len0 < 1e-6 or len1 < 1e-6:
+        return None
+    a0 = (e0 / len0, len0)
+    a1 = (e1 / len1, len1)
+
+    axis = _pick_seam_axis(bgr, mask, a0, a1, dark_v_max)
+    seam_len = axis[1]
+    if seam_len < min_seam_len_px:
+        return None
+
+    cx, cy = center
+    half = seam_len / 2.0
+    top_px = (int(round(cx + axis[0][0] * half)), int(round(cy + axis[0][1] * half)))
+    bottom_px = (int(round(cx - axis[0][0] * half)), int(round(cy - axis[0][1] * half)))
+    angle_deg = float(np.degrees(np.arctan2(axis[0][1], axis[0][0])))
+    return top_px, bottom_px, angle_deg
