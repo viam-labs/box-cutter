@@ -25,3 +25,18 @@ def test_deproject_offset_pixel():
     assert x == pytest.approx(100.0)
     assert y == pytest.approx(0.0)
     assert z == 1000.0
+
+
+from models.detection import inset_endpoints
+
+
+def test_inset_endpoints_pulls_inward():
+    top, bottom = inset_endpoints((0.0, 0.0, 0.0), (100.0, 0.0, 0.0), inset_mm=10)
+    assert top == pytest.approx((10.0, 0.0, 0.0))
+    assert bottom == pytest.approx((90.0, 0.0, 0.0))
+
+
+def test_inset_endpoints_collapses_when_too_short():
+    top, bottom = inset_endpoints((0.0, 0.0, 0.0), (10.0, 0.0, 0.0), inset_mm=8)
+    assert top == pytest.approx((5.0, 0.0, 0.0))
+    assert bottom == pytest.approx((5.0, 0.0, 0.0))

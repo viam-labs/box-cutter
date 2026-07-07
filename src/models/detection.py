@@ -26,3 +26,19 @@ def deproject(u, v, z, intr):
     x = (u - intr.center_x_px) * z / intr.focal_x_px
     y = (v - intr.center_y_px) * z / intr.focal_y_px
     return x, y, z
+
+
+def inset_endpoints(top_xyz, bottom_xyz, inset_mm=INSET_MM):
+    """Pull each 3D endpoint toward the other by inset_mm. Returns (top, bottom).
+
+    If the span is shorter than 2*inset_mm, both collapse to the midpoint.
+    """
+    t = np.array(top_xyz, dtype=float)
+    b = np.array(bottom_xyz, dtype=float)
+    span = b - t
+    length = float(np.linalg.norm(span))
+    if length < 2 * inset_mm:
+        mid = tuple((t + b) / 2.0)
+        return mid, mid
+    u = span / length
+    return tuple(t + u * inset_mm), tuple(b - u * inset_mm)
