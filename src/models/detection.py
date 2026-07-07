@@ -74,3 +74,41 @@ def decode_color_and_depth(images: Sequence[NamedImage]):
     if depth_np is None:
         raise ValueError("camera did not return a depth (VIAM_RAW_DEPTH) frame")
     return color_bgr, depth_np
+
+
+def detect_box_center(
+    bgr,
+    hsv_lower=HSV_LOWER,
+    hsv_upper=HSV_UPPER,
+    min_box_area=MIN_BOX_AREA,
+):
+    """Find the box center by HSV color segmentation.
+
+    Returns (cX, cY, box_mask) -- the centroid pixel and the filled binary mask of
+    the chosen box contour -- or (None, None, None) if no box-colored region passes
+    the area threshold.
+    """
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, np.array(hsv_lower), np.array(hsv_upper))
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=4)
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None, None, None
+
+    largest = max(contours, key=cv2.contourArea)
+    if cv2.contourArea(largest) < min_box_area:
+        return None, None, None
+
+    M = cv2.moments(largest)
+    if M["m00"] == 0:
+        return None, None, None
+    cX = int(M["m10"] / M["m00"])
+    cY = int(M["m01"] / M["m00"])
+
+    box_mask = np.zeros(mask.shape, dtype=np.uint8)
+    cv2.drawContours(box_mask, [largest], -1, 255, thickness=cv2.FILLED)
+    return cX, cY, box_mask

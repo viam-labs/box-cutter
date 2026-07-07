@@ -106,3 +106,36 @@ def test_decode_raises_without_depth():
     images = [_FakeNamedImage(CameraMimeType.JPEG, data=_jpeg_bytes(bgr))]
     with pytest.raises(ValueError, match="depth"):
         decode_color_and_depth(images)
+
+
+from models.detection import detect_box_center
+
+
+def _tan_box_image(w=640, h=480, box=(220, 160, 200, 160)):
+    """Neutral-gray background with one solid tan (HSV ~20,150,200) rectangle."""
+    bgr = np.full((h, w, 3), 128, dtype=np.uint8)
+    x, y, bw, bh = box
+    bgr[y:y + bh, x:x + bw] = (60, 140, 200)  # BGR
+    return bgr, (x + bw // 2, y + bh // 2)
+
+
+def test_detect_box_center_finds_rectangle_center():
+    bgr, (cx_true, cy_true) = _tan_box_image()
+    cx, cy, mask = detect_box_center(bgr)
+    assert cx is not None and cy is not None
+    assert abs(cx - cx_true) <= 5
+    assert abs(cy - cy_true) <= 5
+    assert mask.shape == bgr.shape[:2]
+    assert mask.max() == 255
+
+
+def test_detect_box_center_rejects_small_speck():
+    bgr, _ = _tan_box_image(box=(10, 10, 20, 20))
+    cx, cy, mask = detect_box_center(bgr)
+    assert cx is None and cy is None and mask is None
+
+
+def test_detect_box_center_none_when_no_box_color():
+    bgr = np.full((480, 640, 3), 128, dtype=np.uint8)
+    cx, cy, mask = detect_box_center(bgr)
+    assert cx is None and cy is None and mask is None
