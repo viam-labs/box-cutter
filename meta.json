@@ -3,7 +3,7 @@
   "module_id": "viam-labs:box-cutter",
   "visibility": "public",
   "url": "https://github.com/viam-labs/box-cutter",
-  "description": "Modular generic service: control",
+  "description": "A robotic application for processing packages with an arm and camera.",
   "applications": null,
   "markdown_link": "viam-labs_box-cutter_control.md",
   "entrypoint": "dist/main",
