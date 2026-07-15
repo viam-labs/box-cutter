@@ -43,6 +43,17 @@ class _FakeCamera:
         return _Props()
 
 
+class _FakeRobotClient:
+    async def transform_pose(self, query, destination_frame, **kw):
+        p = query.pose
+        return PoseInFrame(
+            reference_frame=destination_frame,
+            pose=Pose(x=p.x, y=p.y, z=p.z, o_x=0, o_y=0, o_z=-1, theta=0),
+        )
+    def close(self):
+        pass
+
+
 class _FakeMotion:
     async def get_pose(self, component_name, destination_frame, supplemental_transforms=None, **kw):
         t = supplemental_transforms[0].pose_in_observer_frame.pose
@@ -72,6 +83,7 @@ def _make_control():
     ctrl.camera = _FakeCamera(_images_with_box())
     ctrl.motion = _FakeMotion()
     ctrl.arm = None
+    ctrl.robot_client = _FakeRobotClient()
     return ctrl
 
 
