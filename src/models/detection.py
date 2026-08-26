@@ -166,3 +166,94 @@ def find_seam_edges(
     bottom_px = (int(round(cx - axis[0][0] * half)), int(round(cy - axis[0][1] * half)))
     angle_deg = float(np.degrees(np.arctan2(axis[0][1], axis[0][0])))
     return top_px, bottom_px, angle_deg
+
+
+# --- Visual-servo seam tracking defaults --------------------------------------
+# The seam the blade rides is a long, near-vertical crease in the camera frame.
+# Color segmentation (used above for the box body) does not resolve it; the crease
+# is a shading discontinuity, so this path uses Canny + probabilistic Hough and
+# keeps whichever near-vertical segment is closest to the blade's pixel column.
+CANNY_LOW = 15
+CANNY_HIGH = 45
+DILATE_ITERATIONS = 2
+HOUGH_THRESHOLD = 50
+HOUGH_MIN_LINE_LENGTH = 50
+HOUGH_MAX_LINE_GAP = 4
+VERTICAL_DX_RATIO = 0.1  # a segment is "vertical" when dx < ratio * dy
+SEAM_SEARCH_RADIUS_PX = 40  # ignore lines further than this from the blade column
+
+
+def find_vertical_seam_line(
+    bgr,
+    blade_x_px,
+    search_radius_px=SEAM_SEARCH_RADIUS_PX,
+    canny_low=CANNY_LOW,
+    canny_high=CANNY_HIGH,
+    vertical_dx_ratio=VERTICAL_DX_RATIO,
+):
+    """Nearest near-vertical seam line to the blade's pixel column.
+
+    Returns (center_x, center_y, (x1, y1, x2, y2)) for the closest qualifying
+    segment, or None when no such line is visible.
+    """
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, canny_low, canny_high, apertureSize=3)
+    dilated = cv2.dilate(edges, np.ones((2, 2), np.uint8), iterations=DILATE_ITERATIONS)
+
+    lines = cv2.HoughLinesP(
+        dilated,
+        rho=1,
+        theta=np.pi / 180,
+        threshold=HOUGH_THRESHOLD,
+        minLineLength=HOUGH_MIN_LINE_LENGTH,
+        maxLineGap=HOUGH_MAX_LINE_GAP,
+    )
+    if lines is None:
+        return None
+
+    candidates = []
+    for i in range(lines.shape[0]):
+        x1, y1, x2, y2 = lines[i]
+        dx = abs(int(x2) - int(x1))
+        dy = abs(int(y2) - int(y1))
+        center_x = 0.5 * (int(x1) + int(x2))
+        distance = abs(blade_x_px - center_x)
+        # `distance == 0` is the converged case, so it must qualify: the original
+        # script's `0 < distance` guard silently dropped the one candidate that
+        # means "the blade is on the seam".
+        if dx < vertical_dx_ratio * dy and distance < search_radius_px:
+            candidates.append(
+                (distance, center_x, 0.5 * (int(y1) + int(y2)),
+                 (int(x1), int(y1), int(x2), int(y2)))
+            )
+    if not candidates:
+        return None
+
+    # Nearest to the blade wins. The original script built this list but left the
+    # sort commented out, so it took whichever segment Hough happened to emit
+    # first -- "nearest line" in name only.
+    candidates.sort(key=lambda c: c[0])
+    _, center_x, center_y, segment = candidates[0]
+    return center_x, center_y, segment
+
+
+def invert_jacobian(jacobian):
+    """Invert the 2x2 image Jacobian ((du_dX, du_dY), (dv_dX, dv_dY))."""
+    (a, b), (c, d) = jacobian
+    det = a * d - b * c
+    if abs(det) < 1e-9:
+        raise ValueError("servo jacobian is singular; cannot invert")
+    return ((d / det, -b / det), (-c / det, a / det))
+
+
+def pixel_error_to_delta_mm(error_px, inv_jacobian, gain):
+    """One proportional visual-servo step, in tool-frame mm.
+
+    edot = J*thetadot maps image-space change to tool-space change, so
+    thetadot = inv(J)*edot. Driving the error to decay exponentially
+    (edot = -gain*e) gives theta(k) = theta(k-1) - gain*inv(J)*e(k).
+    """
+    error_u, error_v = error_px
+    delta_x = -gain * (inv_jacobian[0][0] * error_u + inv_jacobian[0][1] * error_v)
+    delta_y = -gain * (inv_jacobian[1][0] * error_u + inv_jacobian[1][1] * error_v)
+    return delta_x, delta_y

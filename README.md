@@ -1,20 +1,19 @@
 # Module box-cutter
 
-A Viam module that finds the center of a cardboard box in a depth camera frame and
-plans/executes a cutting motion for a robot arm.
+A Viam module that finds a cardboard box in a depth camera frame and cuts its
+three tape seams with a blade on a robot arm.
 
-The `control` service segments the box by color, computes its center and the
-tape-seam cut endpoints, transforms them into the robot's `world` frame, and can
-move the cutting tool to the center or run a full cut sequence — all triggered via
-`DoCommand`.
+The `control` service segments the box by color, derives its geometry in the
+robot's `world` frame, then works seam by seam: it visually servos the blade onto
+each seam before slicing it. Everything is triggered via `DoCommand`.
 
 ## Models
 
 This module provides the following model(s):
 
 - [`viam-labs:box-cutter:control`](viam-labs_box-cutter_control.md) — locate a box
-  and plan/execute the cut. Supports the `find_center`, `move_to_center`, and
-  `full_cut` commands.
+  and cut its top, far, and close seams. Supports the `set_box`, `home`,
+  `find_center`, `move_to_center`, `converge`, `cut`, and `full_cut` commands.
 
 ## Development
 

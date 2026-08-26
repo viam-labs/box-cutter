@@ -191,3 +191,97 @@ def test_find_seam_edges_falls_back_to_longer_axis_without_dark_seam():
     dx = abs(top_px[0] - bottom_px[0])
     dy = abs(top_px[1] - bottom_px[1])
     assert dx > dy
+
+
+from models.detection import (
+    find_vertical_seam_line,
+    invert_jacobian,
+    pixel_error_to_delta_mm,
+)
+
+
+def _frame_with_vertical_lines(*x_positions, height=(100, 400)):
+    """Light background with dark vertical bars at the given x columns."""
+    bgr = np.full((480, 640, 3), 200, dtype=np.uint8)
+    top, bottom = height
+    for x in x_positions:
+        bgr[top:bottom, x - 1:x + 2] = 20
+    return bgr
+
+
+def test_find_vertical_seam_line_locates_bar_near_blade():
+    bgr = _frame_with_vertical_lines(350)
+    found = find_vertical_seam_line(bgr, blade_x_px=339)
+    assert found is not None
+    center_x, center_y, segment = found
+    assert center_x == pytest.approx(350, abs=3)
+    assert 100 <= center_y <= 400
+    assert len(segment) == 4
+
+
+def test_find_vertical_seam_line_returns_none_on_blank_frame():
+    bgr = np.full((480, 640, 3), 200, dtype=np.uint8)
+    assert find_vertical_seam_line(bgr, blade_x_px=339) is None
+
+
+def test_find_vertical_seam_line_ignores_line_outside_search_radius():
+    bgr = _frame_with_vertical_lines(500)
+    assert find_vertical_seam_line(bgr, blade_x_px=339, search_radius_px=40) is None
+
+
+def test_find_vertical_seam_line_ignores_horizontal_line():
+    bgr = np.full((480, 640, 3), 200, dtype=np.uint8)
+    bgr[238:242, 200:500] = 20
+    assert find_vertical_seam_line(bgr, blade_x_px=339) is None
+
+
+def test_find_vertical_seam_line_picks_nearest_candidate():
+    bgr = _frame_with_vertical_lines(345, 370)
+    found = find_vertical_seam_line(bgr, blade_x_px=339, search_radius_px=40)
+    assert found is not None
+    assert found[0] == pytest.approx(345, abs=3)
+
+
+def test_find_vertical_seam_line_accepts_perfectly_aligned_line():
+    # The original script's filter was `0 < distance < 40`, which rejected the
+    # exactly-centered case -- i.e. the converged one.
+    bgr = _frame_with_vertical_lines(339)
+    found = find_vertical_seam_line(bgr, blade_x_px=339)
+    assert found is not None
+    assert found[0] == pytest.approx(339, abs=3)
+
+
+def test_invert_jacobian_round_trips():
+    j = ((-1.0, 0.1), (0.2, -1.0))
+    inv = invert_jacobian(j)
+    # inv @ j should be the identity
+    for i in range(2):
+        for k in range(2):
+            entry = sum(inv[i][m] * j[m][k] for m in range(2))
+            assert entry == pytest.approx(1.0 if i == k else 0.0, abs=1e-9)
+
+
+def test_invert_jacobian_rejects_singular():
+    with pytest.raises(ValueError, match="singular"):
+        invert_jacobian(((1.0, 2.0), (2.0, 4.0)))
+
+
+def test_pixel_error_to_delta_mm_steps_against_the_error():
+    inv = invert_jacobian(((-1.0, 0.0), (0.0, -1.0)))
+    dx, dy = pixel_error_to_delta_mm((10.0, 0.0), inv, gain=0.2)
+    # inv(J) = -I, so the step is +gain*error: a blade left of the seam moves right.
+    assert dx == pytest.approx(2.0)
+    assert dy == pytest.approx(0.0)
+
+
+def test_pixel_error_to_delta_mm_scales_with_gain():
+    inv = invert_jacobian(((-1.0, 0.1), (0.2, -1.0)))
+    small = pixel_error_to_delta_mm((10.0, 0.0), inv, gain=0.05)
+    large = pixel_error_to_delta_mm((10.0, 0.0), inv, gain=0.20)
+    assert large[0] == pytest.approx(small[0] * 4)
+    assert large[1] == pytest.approx(small[1] * 4)
+
+
+def test_pixel_error_to_delta_mm_zero_error_is_zero_step():
+    inv = invert_jacobian(((-1.0, 0.1), (0.2, -1.0)))
+    assert pixel_error_to_delta_mm((0.0, 0.0), inv, gain=0.2) == (0.0, 0.0)
