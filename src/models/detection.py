@@ -218,10 +218,7 @@ def find_vertical_seam_line(
         dy = abs(int(y2) - int(y1))
         center_x = 0.5 * (int(x1) + int(x2))
         distance = abs(blade_x_px - center_x)
-        # `distance == 0` is the converged case, so it must qualify: the original
-        # script's `0 < distance` guard silently dropped the one candidate that
-        # means "the blade is on the seam".
-        if dx < vertical_dx_ratio * dy and distance < search_radius_px:
+        if dx < vertical_dx_ratio * dy and 0 < distance < search_radius_px:
             candidates.append(
                 (distance, center_x, 0.5 * (int(y1) + int(y2)),
                  (int(x1), int(y1), int(x2), int(y2)))
@@ -229,9 +226,7 @@ def find_vertical_seam_line(
     if not candidates:
         return None
 
-    # Nearest to the blade wins. The original script built this list but left the
-    # sort commented out, so it took whichever segment Hough happened to emit
-    # first -- "nearest line" in name only.
+    # Nearest to the blade, but not on the blade itself, wins
     candidates.sort(key=lambda c: c[0])
     _, center_x, center_y, segment = candidates[0]
     return center_x, center_y, segment
