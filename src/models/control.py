@@ -1,10 +1,7 @@
 """The `viam-labs:box-cutter:control` service.
 
-This is the box-cutting procedure from the standalone `boxCutterSrc.py` client
-script, restructured as `do_command` calls. The script drove the sequence with
-keypresses and OpenCV windows; a module cannot block on a human, so each stage
-the operator used to confirm is its own command, and the visual-servo loop that
-used to end when someone pressed a key now ends on its own bounds.
+The control service exposes a number of DoCommand endpoints that allow the 
+user to operate an arm equipped with a camera in a box-cutting scenario.
 
 Seam names throughout are from the blade's point of view at the box:
   top   -- the seam running across the top of the box, cut in two passes
@@ -47,12 +44,7 @@ SEAM_FAR = "far"
 SEAM_CLOSE = "close"
 SEAMS = (SEAM_TOP, SEAM_FAR, SEAM_CLOSE)
 
-# Hand-tuned asymmetries carried over verbatim from the script. They track blade
-# geometry rather than the cell, so they are constants rather than config: a
-# re-measured stopper is a config change, but these only move if the blade does.
-TOP_SEAM_ENTRY_EXTRA_MM = 2.0     # first top-seam pass digs deeper than the second
-TOP_SEAM_EXIT_EXTRA_MM = 3.0      # final top-seam retract clears higher
-CLOSE_SEAM_ENTRY_EXTRA_MM = 2.0   # close seam enters deeper than the far seam
+# Hand-tuned asymmetries from expirmental data that adjust the motion calls of the arm. 
 CLOSE_SEAM_RETRACT_MM = 40.0      # close seam retracts much further than it inserted
 FAR_SEAM_APPROACH_X_MM = 5.0      # lateral nudge only the far approach uses
 CLOSE_SEAM_FINAL_THETA_DEG = 90.0  # unwinds the tool after the last cut
@@ -142,7 +134,7 @@ def _pose_to_dict(pose) -> dict:
 
 
 @dataclass
-class BoxFrame:
+class BoxData:
     """Everything the cutting commands need about the box in front of the blade.
 
     Derived once by `find_center` and read by every later command, so a converge
@@ -241,7 +233,7 @@ class Settings:
     def from_config(cls, config: ComponentConfig) -> "Settings":
         camera_name = _str(config, "camera")
         arm_name = _str(config, "arm")
-        tool_frame = _str(config, "tool_frame")
+        tool_frame = _str(config, "stylus-tool")
         if not camera_name:
             raise ValueError("'camera' is required")
         if not arm_name:
@@ -252,7 +244,7 @@ class Settings:
             camera_name=camera_name,
             arm_name=arm_name,
             tool_frame=tool_frame,
-            blade_frame=_str(config, "blade_frame", ""),
+            blade_frame=_str(config, "blade_frame", "blade-tool-90deg"),
             motion_name=_str(config, "motion_service", "builtin"),
             camera_frame=_str(config, "camera_frame", camera_name),
             world_frame=_str(config, "world_frame", "world"),
@@ -335,7 +327,7 @@ class Control(Generic, EasyResource):
         # Per-box state cannot outlive a reconfigure: new geometry would be read
         # against measurements taken for the previous setup.
         self._box_override: Optional[dict] = None
-        self._box_frame: Optional[BoxFrame] = None
+        self._box_data: Optional[BoxData] = None
 
     # --- dispatch -------------------------------------------------------------
 
@@ -390,7 +382,7 @@ class Control(Generic, EasyResource):
         Any override invalidates the stored box frame: geometry derived from the
         previous numbers must not be read against new ones.
         """
-        self._box_frame = None
+        self._box_data = None
 
         if command.get("clear"):
             self._box_override = None
@@ -435,6 +427,7 @@ class Control(Generic, EasyResource):
 
     # --- detection ------------------------------------------------------------
 
+    # NOTE: potentially move overrides higher in this function
     async def find_center(self) -> Mapping[str, ValueTypes]:
         """Detect the box, apply any override, and derive the box frame."""
         s = self.settings
@@ -460,12 +453,12 @@ class Control(Generic, EasyResource):
             color_bgr, s.hsv_lower, s.hsv_upper, s.min_box_area
         )
         if u is None:
-            self._box_frame = None
+            self._box_data = None
             return {"found": False, "reason": "no box-colored region found"}
 
         z = sample_depth_in_mask(depth_np, mask)
         if z is None:
-            self._box_frame = None
+            self._box_data = None
             return {"found": False, "reason": "no valid depth in box mask"}
 
         # The seam overlay is reported from what was actually detected, before any
@@ -490,7 +483,7 @@ class Control(Generic, EasyResource):
         # reaches as far past its own center again -- hence the doubling. The top
         # sits a knife-tip's reach below the table height, less the base plate.
         knife_tip_to_top_mm = float(tool.pose.z)
-        box = BoxFrame(
+        box = BoxData(
             center_x_mm=float(world.pose.x),
             center_y_mm=float(world.pose.y),
             center_z_mm=(
@@ -502,7 +495,7 @@ class Control(Generic, EasyResource):
             tool_y_mm=float(tool.pose.y),
             flap_width_mm=flap_width_mm,
         )
-        self._box_frame = box
+        self._box_data = box
 
         result = {
             "found": True,
@@ -556,7 +549,7 @@ class Control(Generic, EasyResource):
         if not result.get("found"):
             return result
         s = self.settings
-        box = self._box_frame
+        box = self._box_data
         await self.motion.move(
             component_name=s.tool_frame,
             destination=self._tool_pose(
@@ -573,7 +566,7 @@ class Control(Generic, EasyResource):
         result["moved"] = True
         return result
 
-    async def _stage_side_seam(self, seam: str, box: BoxFrame) -> None:
+    async def _stage_side_seam(self, seam: str, box: BoxData) -> None:
         """Park the blade at a side seam, angled and offset onto the tape.
 
         The far seam sits a box-height beyond the stopper; the close one sits at
@@ -618,14 +611,12 @@ class Control(Generic, EasyResource):
     async def converge(self, seam: str = SEAM_TOP) -> Mapping[str, ValueTypes]:
         """Visual-servo the blade onto a seam.
 
-        The script showed each candidate line in an OpenCV window and blocked on
-        `waitKey(0)`, so a human decided when it was close enough and when to
-        give up. Here the loop carries its own bounds, and a seam that will not
+        The loop carries its own bounds, and a seam that will not
         converge comes back as `success: false` -- an outcome to branch on, not
         an error: the caller can retry the search without having cut anything.
         """
         s = self.settings
-        box = self._box_frame
+        box = self._box_data
         if box is None:
             return self._converge_failure(
                 seam, 0, "no box frame; run find_center first"
@@ -672,9 +663,8 @@ class Control(Generic, EasyResource):
                 search_radius_px=s.seam_search_radius_px,
             )
             if found is None:
-                # The script answered a blank frame by zeroing the step and
-                # looping, which spins forever without moving. A run of them ends
-                # the attempt instead.
+                # If a seam isn't found, we count it as a "blank_frame". After 
+                # reaching 5 "blank_frames" in a row, the attempt stops with a fail.
                 blank_frames += 1
                 delta = (0.0, 0.0)
                 if blank_frames >= s.converge_max_blank_frames:
@@ -731,7 +721,7 @@ class Control(Generic, EasyResource):
         tool's world Y.
         """
         s = self.settings
-        box = self._box_frame
+        box = self._box_data
         if box is None:
             return {
                 "completed": False,
@@ -758,7 +748,7 @@ class Control(Generic, EasyResource):
             steps = await self._cut_side_seam(seam)
         return {"completed": True, "seam": seam, "steps": steps}
 
-    async def _seam_from_tool_pose(self, box: BoxFrame):
+    async def _seam_from_tool_pose(self, box: BoxData):
         """Which seam is the blade parked at? Returns (seam, reason)."""
         s = self.settings
         pose = await self.motion.get_pose(
@@ -788,20 +778,20 @@ class Control(Generic, EasyResource):
             )
         return in_range[0][1], None
 
-    async def _cut_top_seam(self, box: BoxFrame) -> list:
+    async def _cut_top_seam(self, box: BoxData) -> list:
         """Two passes from the center: forward, back to center, then backward.
 
-        The blade cannot cut the whole seam in one stroke without driving the arm
-        past the box, so each half is sliced from the middle outward. The slice
-        itself is broken into chunks -- the script's way of keeping each commanded
-        move short.
+        The blade was making an arch movement when cutting the top seam in one move
+        , so each half is sliced from the middle outward. The slice
+        itself is broken into chunks. Can be changed to one big cut with "LinearConstraint"
         """
         s = self.settings
         steps = []
         chunks = [f * box.height_mm for f in s.top_seam_chunks]
-        span = sum(chunks)
+        cut_distance = sum(chunks)
 
-        await self._tool_move(z=s.top_blade_insert_mm + TOP_SEAM_ENTRY_EXTRA_MM)
+        # TODO: double check this extra business
+        await self._tool_move(z=s.top_blade_insert_mm)
         steps.append("insert")
         for chunk in chunks:
             await self._tool_move(y=chunk)
@@ -809,7 +799,7 @@ class Control(Generic, EasyResource):
         await self._tool_move(z=-s.top_blade_insert_mm)
         steps.append("retract")
 
-        await self._tool_move(y=-span)
+        await self._tool_move(y=-cut_distance)
         steps.append("return_to_center")
 
         await self._tool_move(z=s.top_blade_insert_mm)
@@ -817,7 +807,7 @@ class Control(Generic, EasyResource):
         for chunk in chunks:
             await self._tool_move(y=-chunk)
             steps.append("slice_back")
-        await self._tool_move(z=-(s.top_blade_insert_mm + TOP_SEAM_EXIT_EXTRA_MM))
+        await self._tool_move(z=-(s.top_blade_insert_mm))
         steps.append("retract")
         return steps
 
@@ -829,7 +819,7 @@ class Control(Generic, EasyResource):
             retract_z = -s.side_blade_insert_mm
             straighten_theta = s.blade_angle_deg
         else:
-            insert_z = s.side_blade_insert_mm + CLOSE_SEAM_ENTRY_EXTRA_MM
+            insert_z = s.side_blade_insert_mm
             # The close seam pulls far clear of the box on the way out, not just
             # back out of the tape.
             retract_z = -CLOSE_SEAM_RETRACT_MM
