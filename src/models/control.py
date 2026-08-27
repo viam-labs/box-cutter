@@ -231,8 +231,8 @@ class Settings:
 
     @classmethod
     def from_config(cls, config: ComponentConfig) -> "Settings":
-        camera_name = _str(config, "camera")
-        arm_name = _str(config, "arm")
+        camera_name = _str(config, "realsense-cam")
+        arm_name = _str(config, "arm-UR5")
         tool_frame = _str(config, "stylus-tool")
         if not camera_name:
             raise ValueError("'camera' is required")
