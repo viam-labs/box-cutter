@@ -1,6 +1,6 @@
 """The `viam-labs:box-cutter:control` service.
 
-The control service exposes a number of DoCommand endpoints that allow the 
+The control service exposes a number of DoCommand endpoints that allow the
 user to operate an arm equipped with a camera in a box-cutting scenario.
 
 Seam names throughout are from the blade's point of view at the box:
@@ -28,7 +28,7 @@ from viam.services.motion import Constraints, MotionClient
 from viam.utils import ValueTypes
 
 from models.detection import (
-    decode_color_and_depth,
+    decode_color,
     deproject,
     detect_box_center,
     find_seam_edges,
@@ -44,27 +44,44 @@ SEAM_FAR = "far"
 SEAM_CLOSE = "close"
 SEAMS = (SEAM_TOP, SEAM_FAR, SEAM_CLOSE)
 
-# Hand-tuned asymmetries from expirmental data that adjust the motion calls of the arm. 
+# Hand-tuned asymmetries from expirmental data that adjust the motion calls of the arm.
 CLOSE_SEAM_RETRACT_MM = 40.0      # close seam retracts much further than it inserted
-FAR_SEAM_APPROACH_X_MM = 5.0      # lateral nudge only the far approach uses
+FAR_SEAM_APPROACH_LATERAL_MM = 5.0  # lateral nudge only the far approach uses
+# Which way along tool x the blade travels when slicing. The tool frame's x runs
+# along the seam at every seam (the tool yaws with the seam), but whether +x
+# points up or down the seam was not derivable from the frame measurements --
+# flip this if a retracted dry run shows the side-seam stroke leaving the box.
+# The top seam is unaffected: it cuts symmetrically either side of center.
+CUT_SIGN = 1.0
 CLOSE_SEAM_FINAL_THETA_DEG = 90.0  # unwinds the tool after the last cut
+# TODO: still the old arm's value. This is a world-frame yaw (passed to
+# `_world_pose`), so the +90 deg base rotation shifts it to either 0 or -180.
+# Theta is measured about o_z=-1, which makes the sign easy to get backwards --
+# jog the tool into the side-seam orientation and read it back from
+# `motion.get_pose(tool_frame, world)` rather than deriving it.
 SIDE_SEAM_THETA_DEG = -90.0       # tool yaw for both side-seam approaches
 
 # Two seam candidates closer together than this cannot be told apart from the
 # tool pose alone, so `cut` refuses rather than guessing which one it is on.
 SEAM_AMBIGUITY_MM = 5.0
 
+# `jog` is driven by hand with a blade mounted, so a fat-fingered 50 where 5 was
+# meant should be refused rather than executed.
+JOG_MAX_MM = 50.0
+
+
+# TODO: remeasure the cut calculations (height_mm for the box)
 # The five boxes measured on the original cell, as
-# (depth_mm, u, v, flap_width_mm) -- see `set_box`.
+# (depth_mm, u, v, flap_width_mm, box_height_mm) -- see `set_box`.
 BOX_PRESETS = {
-    "box_1": (535.0, 380, 242, 120.0),
-    "box_2": (456.0, 401, 254, 106.0),
-    "box_3": (479.0, 422, 262, 80.0),
-    "box_4": (477.0, 425, 285, 82.0),
-    "box_5": (553.0, 413, 260, 80.0),
+    "box_1": (535.0, 360, 223, 120.0, 280.0),
+    "box_2": (456.0, 401, 254, 106.0, -1),
+    "box_3": (479.0, 422, 262, 80.0, -1),
+    "box_4": (477.0, 425, 285, 82.0, -1),
+    "box_5": (553.0, 413, 260, 80.0, -1),
 }
 
-_BOX_MEASUREMENTS = ("depth_mm", "u", "v", "flap_width_mm")
+_BOX_MEASUREMENTS = ("depth_mm", "u", "v", "flap_width_mm", "box_height_mm")
 
 
 async def create_robot_client_from_module():
@@ -119,6 +136,42 @@ def _floats(
     if not vals:
         raise ValueError(f"'{key}' must not be empty")
     return vals
+
+
+def _properties_to_dict(properties) -> dict:
+    """Camera properties flattened to JSON-safe primitives.
+
+    Read defensively: a DoCommand result has to serialize into a protobuf
+    Struct, and which fields a camera populates varies by model -- a webcam with
+    no calibration omits the intrinsics a RealSense reports.
+    """
+    out = {
+        "supports_pcd": bool(getattr(properties, "supports_pcd", False)),
+        "mime_types": [str(m) for m in getattr(properties, "mime_types", [])],
+    }
+
+    frame_rate = getattr(properties, "frame_rate", None)
+    if frame_rate is not None:
+        out["frame_rate"] = float(frame_rate)
+
+    intr = getattr(properties, "intrinsic_parameters", None)
+    if intr is not None:
+        out["intrinsic_parameters"] = {
+            "width_px": int(getattr(intr, "width_px", 0)),
+            "height_px": int(getattr(intr, "height_px", 0)),
+            "fx": float(getattr(intr, "focal_x_px", 0.0)),
+            "fy": float(getattr(intr, "focal_y_px", 0.0)),
+            "ppx": float(getattr(intr, "center_x_px", 0.0)),
+            "ppy": float(getattr(intr, "center_y_px", 0.0)),
+        }
+
+    dist = getattr(properties, "distortion_parameters", None)
+    if dist is not None:
+        out["distortion_parameters"] = {
+            "model": str(getattr(dist, "model", "")),
+            "parameters": [float(p) for p in getattr(dist, "parameters", [])],
+        }
+    return out
 
 
 def _pose_to_dict(pose) -> dict:
@@ -181,7 +234,7 @@ class Settings:
     seam_dark_v_max: int
 
     # Measured ground truth for this cell.
-    stopper_y_mm: float
+    stopper_x_mm: float
     knife_tip_to_table_mm: float
     base_plate_height_mm: float
     home_xyz: Tuple[float, ...]
@@ -231,9 +284,9 @@ class Settings:
 
     @classmethod
     def from_config(cls, config: ComponentConfig) -> "Settings":
-        camera_name = _str(config, "realsense-cam")
-        arm_name = _str(config, "arm-UR5")
-        tool_frame = _str(config, "stylus-tool")
+        camera_name = _str(config, "camera")
+        arm_name = _str(config, "arm")
+        tool_frame = _str(config, "tool_frame")
         if not camera_name:
             raise ValueError("'camera' is required")
         if not arm_name:
@@ -254,15 +307,19 @@ class Settings:
             inset_mm=_num(config, "inset_mm", 8.0),
             min_seam_len_px=_num(config, "min_seam_len_px", 60),
             seam_dark_v_max=_num(config, "seam_dark_v_max", 80),
-            stopper_y_mm=_num(config, "stopper_y_mm", -450.0),
+            stopper_x_mm=_num(config, "stopper_x_mm", 370.0),
             knife_tip_to_table_mm=_num(config, "knife_tip_to_table_mm", 490.0),
             base_plate_height_mm=_num(config, "base_plate_height_mm", 20.0),
-            home_xyz=_floats(config, "home_xyz", (-4.0, -551.0, 470.0), length=3),
+            home_xyz=_floats(config, "home_xyz", (399.97, -0, 406.48), length=3),
             center_standoff_mm=_num(config, "center_standoff_mm", 20.0),
-            blade_x_px=_num(config, "blade_x_px", 339.0),
+            blade_x_px=_num(config, "blade_x_px", 344.0),
             converge_tolerance_px=_num(config, "converge_tolerance_px", 2.25),
+            # Measured on this cell at the top-seam standoff: tool +y moves the
+            # seam +3.2 px per mm. The dv/dX term only has to be nonzero for the
+            # matrix to invert -- converge hardcodes error_v to 0, so it never
+            # reaches the output.
             servo_jacobian=_floats(
-                config, "servo_jacobian", (-1.0, 0.1, 0.2, -1.0), length=4
+                config, "servo_jacobian", (0.0, 3.2, -3.2, 0.0), length=4
             ),
             top_seam_gain=_num(config, "top_seam_gain", 0.2),
             far_seam_gain=_num(config, "far_seam_gain", 0.05),
@@ -271,7 +328,7 @@ class Settings:
             converge_max_blank_frames=_num(config, "converge_max_blank_frames", 5),
             seam_search_radius_px=_num(config, "seam_search_radius_px", 40.0),
             top_blade_insert_mm=_num(config, "top_blade_insert_mm", 25.0),
-            side_blade_insert_mm=_num(config, "side_blade_insert_mm", 16.0),
+            side_blade_insert_mm=_num(config, "side_blade_insert_mm", 0.0), # was 16
             top_seam_chunks=_floats(config, "top_seam_chunks", (0.2, 0.2, 0.25)),
             side_seam_slice_mm=_num(config, "side_seam_slice_mm", 90.0),
             side_seam_z_offset_mm=_num(config, "side_seam_z_offset_mm", 15.0),
@@ -331,6 +388,17 @@ class Control(Generic, EasyResource):
 
     # --- dispatch -------------------------------------------------------------
 
+    async def get_properties(self) -> Mapping[str, ValueTypes]:
+        """The camera's reported properties, for reading calibration off a cell.
+
+        Note the API and the camera config spell intrinsics differently: the
+        response gives focal_x_px/focal_y_px/center_x_px/center_y_px, while a
+        camera config wants fx/fy/ppx/ppy. Unknown config keys are dropped
+        silently, so a straight paste validates but yields no intrinsics.
+        """
+        properties = await self.camera.get_properties()
+        return _properties_to_dict(properties)
+
     async def do_command(
         self,
         command: Mapping[str, ValueTypes],
@@ -342,10 +410,14 @@ class Control(Generic, EasyResource):
         if not name:
             raise ValueError("do_command requires a 'command' key")
         seam = self._seam_arg(command)
+        if name == "get_properties":
+            return await self.get_properties()
         if name == "set_box":
             return self.set_box(command)
         if name == "home":
             return await self.home()
+        if name == "jog":
+            return await self.jog(command)
         if name == "find_center":
             return await self.find_center()
         if name == "move_to_center":
@@ -356,6 +428,10 @@ class Control(Generic, EasyResource):
             return await self.cut(seam)
         if name == "full_cut":
             return await self.full_cut()
+        if name == "tool_change":
+            return await self.tool_change()
+        if name == "move_to_seam":
+            return await self.move_to_seam(seam)
         raise ValueError(f"unknown command: {name!r}")
 
     @staticmethod
@@ -396,7 +472,7 @@ class Control(Generic, EasyResource):
                     f"unknown box preset: {key!r} "
                     f"(known presets: {', '.join(sorted(BOX_PRESETS))})"
                 )
-            depth_mm, u, v, flap_width_mm = BOX_PRESETS[key]
+            depth_mm, u, v, flap_width_mm, box_height_mm = BOX_PRESETS[key]
         else:
             missing = [k for k in _BOX_MEASUREMENTS if command.get(k) is None]
             if missing:
@@ -408,12 +484,14 @@ class Control(Generic, EasyResource):
             u = int(command["u"])
             v = int(command["v"])
             flap_width_mm = float(command["flap_width_mm"])
+            box_height_mm = float(command["box_height_mm"])
 
         box = {
             "depth_mm": float(depth_mm),
             "u": int(u),
             "v": int(v),
             "flap_width_mm": float(flap_width_mm),
+            "box_height_mm": float(box_height_mm),
         }
         nonpositive = [k for k, val in box.items() if val <= 0]
         if nonpositive:
@@ -431,53 +509,63 @@ class Control(Generic, EasyResource):
     async def find_center(self) -> Mapping[str, ValueTypes]:
         """Detect the box, apply any override, and derive the box frame."""
         s = self.settings
-        images, _ = await self.camera.get_images()
+        # images, _ = await self.camera.get_images()
         properties = await self.camera.get_properties()
         intr = properties.intrinsic_parameters
+        # A camera with no calibration reports zero focal lengths, which would
+        # surface as a ZeroDivisionError from inside deproject rather than
+        # something a caller can act on.
         if not intr.focal_x_px or not intr.focal_y_px:
             raise ValueError(
                 "camera returned no intrinsic parameters; cannot deproject "
                 "(configure the camera to emit intrinsics)"
             )
 
-        color_bgr, depth_np = decode_color_and_depth(images)
-        if depth_np.shape[:2] != color_bgr.shape[:2]:
-            raise ValueError(
-                f"depth {depth_np.shape[:2]} not aligned to color "
-                f"{color_bgr.shape[:2]}; cannot deproject with color intrinsics"
-            )
+        # color_bgr, depth_np = decode_color_and_depth(images)
+        # if depth_np.shape[:2] != color_bgr.shape[:2]:
+        #     raise ValueError(
+        #         f"depth {depth_np.shape[:2]} not aligned to color "
+        #         f"{color_bgr.shape[:2]}; cannot deproject with color intrinsics"
+        #     )
 
-        # A failed detection drops the stored frame: if the box cannot be seen,
-        # the geometry derived when it could must not be cut against.
-        u, v, mask = detect_box_center(
-            color_bgr, s.hsv_lower, s.hsv_upper, s.min_box_area
-        )
-        if u is None:
-            self._box_data = None
-            return {"found": False, "reason": "no box-colored region found"}
+        # # A failed detection drops the stored frame: if the box cannot be seen,
+        # # the geometry derived when it could must not be cut against.
+        # u, v, mask = detect_box_center(
+        #     color_bgr, s.hsv_lower, s.hsv_upper, s.min_box_area
+        # )
+        # if u is None:
+        #     self._box_data = None
+        #     return {"found": False, "reason": "no box-colored region found"}
 
-        z = sample_depth_in_mask(depth_np, mask)
-        if z is None:
-            self._box_data = None
-            return {"found": False, "reason": "no valid depth in box mask"}
+        # z = sample_depth_in_mask(depth_np, mask)
+        # if z is None:
+        #     self._box_data = None
+        #     return {"found": False, "reason": "no valid depth in box mask"}
 
-        # The seam overlay is reported from what was actually detected, before any
-        # override replaces the center -- it describes this frame, not the box.
-        seam = find_seam_edges(
-            mask, (u, v), color_bgr, s.seam_dark_v_max, s.min_seam_len_px
-        )
+        # # The seam overlay is reported from what was actually detected, before any
+        # # override replaces the center -- it describes this frame, not the box.
+        # seam = find_seam_edges(
+        #     mask, (u, v), color_bgr, s.seam_dark_v_max, s.min_seam_len_px
+        # )
 
         override = self._box_override
+        if not override:
+            raise ValueError("Currently only supporting manual setting. Run set_box first.")
+
         flap_width_mm = None
-        if override is not None:
-            z = override["depth_mm"]
-            u = override["u"]
-            v = override["v"]
-            flap_width_mm = override["flap_width_mm"]
+        height_mm: Optional[float] = None
+        z = override["depth_mm"]
+        u = override["u"]
+        v = override["v"]
+        flap_width_mm = override["flap_width_mm"]
+        height_mm = override["box_height_mm"]
 
         cx, cy, cz = deproject(u, v, z, intr)
         world = await self._to_frame((cx, cy, cz), s.world_frame)
         tool = await self._to_frame((cx, cy, cz), s.tool_frame)
+
+        if height_mm is None:
+            height_mm = 2 * abs(s.stopper_x_mm - float(world.pose.x))
 
         # Ground truth: the stopper pins the near edge of the box, so the box
         # reaches as far past its own center again -- hence the doubling. The top
@@ -489,7 +577,7 @@ class Control(Generic, EasyResource):
             center_z_mm=(
                 s.knife_tip_to_table_mm - knife_tip_to_top_mm - s.base_plate_height_mm
             ),
-            height_mm=2 * abs(s.stopper_y_mm - float(world.pose.y)),
+            height_mm=height_mm,
             knife_tip_to_top_mm=knife_tip_to_top_mm,
             tool_x_mm=float(tool.pose.x),
             tool_y_mm=float(tool.pose.y),
@@ -509,20 +597,20 @@ class Control(Generic, EasyResource):
             "box_frame": box.to_dict(),
         }
 
-        if seam is not None:
-            top_px, bottom_px, angle_deg = seam
-            top_w = await self._endpoint_world(top_px, z, intr)
-            bottom_w = await self._endpoint_world(bottom_px, z, intr)
-            top_inset, bottom_inset = inset_endpoints(top_w, bottom_w, s.inset_mm)
-            result["seam"] = {
-                "top_px": [int(top_px[0]), int(top_px[1])],
-                "bottom_px": [int(bottom_px[0]), int(bottom_px[1])],
-                "angle_deg": float(angle_deg),
-            }
-            result["cut_endpoints_world"] = {
-                "top": [float(c) for c in top_inset],
-                "bottom": [float(c) for c in bottom_inset],
-            }
+        # if seam is not None:
+        #     top_px, bottom_px, angle_deg = seam
+        #     top_w = await self._endpoint_world(top_px, z, intr)
+        #     bottom_w = await self._endpoint_world(bottom_px, z, intr)
+        #     top_inset, bottom_inset = inset_endpoints(top_w, bottom_w, s.inset_mm)
+        #     result["seam"] = {
+        #         "top_px": [int(top_px[0]), int(top_px[1])],
+        #         "bottom_px": [int(bottom_px[0]), int(bottom_px[1])],
+        #         "angle_deg": float(angle_deg),
+        #     }
+        #     result["cut_endpoints_world"] = {
+        #         "top": [float(c) for c in top_inset],
+        #         "bottom": [float(c) for c in bottom_inset],
+        #     }
         return result
 
     # --- staging motions ------------------------------------------------------
@@ -539,6 +627,63 @@ class Control(Generic, EasyResource):
             destination=self._world_pose(x, y, z),
         )
 
+    async def jog(self, command: Mapping[str, ValueTypes]) -> Mapping[str, ValueTypes]:
+        """Step the tool in its own frame and report the world pose either side.
+
+        A bench tool for reading how the tool frame's axes land in world
+        coordinates: `world_delta` is the answer, so checking an axis takes one
+        call rather than a jog plus two pose reads.
+        """
+        s = self.settings
+        step = {a: float(command.get(a) or 0.0) for a in ("x", "y", "z")}
+        theta = float(command.get("theta") or 0.0)
+        if not any(step.values()) and not theta:
+            raise ValueError("jog needs a nonzero 'x', 'y', 'z' or 'theta'")
+        too_far = [f"{a}={v}" for a, v in step.items() if abs(v) > JOG_MAX_MM]
+        if too_far:
+            raise ValueError(
+                f"jog step exceeds JOG_MAX_MM={JOG_MAX_MM:.0f}: {', '.join(too_far)}"
+            )
+
+        before = await self.motion.get_pose(
+            component_name=s.tool_frame, destination_frame=s.world_frame
+        )
+        await self._tool_move(theta=theta, **step)
+        after = await self.motion.get_pose(
+            component_name=s.tool_frame, destination_frame=s.world_frame
+        )
+        return {
+            "jogged": {**step, "theta": theta},
+            "world_before": _pose_to_dict(before.pose),
+            "world_after": _pose_to_dict(after.pose),
+            "world_delta": {
+                a: round(float(getattr(after.pose, a) - getattr(before.pose, a)), 3)
+                for a in ("x", "y", "z")
+            },
+        }
+
+    async def tool_change(self) -> Mapping[str, ValueTypes]:
+        await self._tool_change()
+        return {"tool_changed": True}
+
+    async def _tool_change(self) -> None:
+        # Disabled until the tool-change deck is re-measured on the new arm: the
+        # pose below is in the old arm's frame, so driving to it would be a guess.
+        # s = self.settings
+        # pose_above_deck = self._world_pose(251.86, -405.89, 115.23)
+        # tool_change_descent = 121.5
+        # await self.motion.move(component_name=s.tool_frame, destination=pose_above_deck)
+        # # z goes to -6.75
+        # tool_change_constraint=Constraints(
+        #                linear_constraint=[
+        #                    LinearConstraint(line_tolerance_mm=s.descent_tolerance_mm)
+        #                ]
+        #            )
+        # await self.motion.move(component_name=s.tool_frame, destination=self._tool_pose(x=0, y=0, z=tool_change_descent), constraints=tool_change_constraint)
+        # await self.motion.move(component_name=s.tool_frame, destination=self._tool_pose(x=0, y=0, z=-tool_change_descent), constraints=tool_change_constraint)
+        return
+
+
     async def move_to_center(self) -> Mapping[str, ValueTypes]:
         """Run find_center, then descend to a standoff above the box top.
 
@@ -553,9 +698,9 @@ class Control(Generic, EasyResource):
         await self.motion.move(
             component_name=s.tool_frame,
             destination=self._tool_pose(
-                x=box.tool_x_mm,
-                y=box.tool_y_mm,
-                z=box.knife_tip_to_top_mm - s.center_standoff_mm,
+                x=box.tool_x_mm, # 383
+                y=box.tool_y_mm, # -3
+                z=box.knife_tip_to_top_mm - s.center_standoff_mm, # 285 - 20 = 265
             ),
             constraints=Constraints(
                 linear_constraint=[
@@ -564,6 +709,25 @@ class Control(Generic, EasyResource):
             ),
         )
         result["moved"] = True
+        return result
+
+    async def move_to_seam(self, seam: str | None) -> Mapping[str, ValueTypes]:
+        """Run find_center, then descend to a standoff above the box top.
+
+        Returns the find_center payload plus a `moved` key (the accumulating dict
+        is intentional).
+        """
+
+        if seam is None:
+            return {"error": "seam is required"}
+
+        result = {}
+
+        if seam == SEAM_FAR or seam == SEAM_CLOSE:
+            await self._stage_side_seam(seam, self._box_data)
+            result["moved"] = True
+        else:
+            result["error"] = "can only move to far or close seam"
         return result
 
     async def _stage_side_seam(self, seam: str, box: BoxData) -> None:
@@ -576,19 +740,21 @@ class Control(Generic, EasyResource):
         """
         s = self.settings
         if seam == SEAM_FAR:
-            seam_y = s.stopper_y_mm - box.height_mm
+            # The box extends away from the base along +x, so the far edge sits a
+            # box-span past the stopper rather than before it.
+            seam_x = s.stopper_x_mm + box.height_mm
             blade_theta = -s.blade_angle_deg
-            approach_x = FAR_SEAM_APPROACH_X_MM
+            approach_lateral = FAR_SEAM_APPROACH_LATERAL_MM
         else:
-            seam_y = s.stopper_y_mm
+            seam_x = s.stopper_x_mm
             blade_theta = s.blade_angle_deg
-            approach_x = 0.0
+            approach_lateral = 0.0
 
         await self.motion.move(
             component_name=s.tool_frame,
             destination=self._world_pose(
-                x=box.center_x_mm,
-                y=seam_y,
+                x=seam_x,
+                y=box.center_y_mm,
                 z=box.center_z_mm + s.side_seam_z_offset_mm,
                 theta=SIDE_SEAM_THETA_DEG,
             ),
@@ -600,8 +766,10 @@ class Control(Generic, EasyResource):
         await self.motion.move(
             component_name=s.tool_frame,
             destination=self._tool_pose(
-                x=approach_x,
-                y=-s.seam_offset_fraction * box.flap_width_mm,
+                # Back off along the seam, so the stroke that follows cuts
+                # through its whole length rather than starting mid-tape.
+                x=-CUT_SIGN * s.seam_offset_fraction * box.flap_width_mm,
+                y=approach_lateral,
                 z=0.0,
             ),
         )
@@ -637,7 +805,6 @@ class Control(Generic, EasyResource):
                     "no flap width for this box; detection cannot recover it, so "
                     "run set_box first",
                 )
-            await self._stage_side_seam(seam, box)
 
         inv_jacobian = invert_jacobian(s.jacobian_rows())
         gain = s.gain_for(seam)
@@ -656,14 +823,14 @@ class Control(Generic, EasyResource):
             iterations += 1
 
             images, _ = await self.camera.get_images()
-            color_bgr, _ = decode_color_and_depth(images)
+            color_bgr = decode_color(images)
             found = find_vertical_seam_line(
                 color_bgr,
                 blade_x_px=s.blade_x_px,
                 search_radius_px=s.seam_search_radius_px,
             )
             if found is None:
-                # If a seam isn't found, we count it as a "blank_frame". After 
+                # If a seam isn't found, we count it as a "blank_frame". After
                 # reaching 5 "blank_frames" in a row, the attempt stops with a fail.
                 blank_frames += 1
                 delta = (0.0, 0.0)
@@ -754,12 +921,12 @@ class Control(Generic, EasyResource):
         pose = await self.motion.get_pose(
             component_name=s.tool_frame, destination_frame=s.world_frame
         )
-        tool_y = float(pose.pose.y)
+        tool_x = float(pose.pose.x)
         candidates = sorted(
             (
-                (abs(tool_y - box.center_y_mm), SEAM_TOP),
-                (abs(tool_y - (s.stopper_y_mm - box.height_mm)), SEAM_FAR),
-                (abs(tool_y - s.stopper_y_mm), SEAM_CLOSE),
+                (abs(tool_x - box.center_x_mm), SEAM_TOP),
+                (abs(tool_x - (s.stopper_x_mm + box.height_mm)), SEAM_FAR),
+                (abs(tool_x - s.stopper_x_mm), SEAM_CLOSE),
             )
         )
         in_range = [c for c in candidates if c[0] <= s.seam_match_tolerance_mm]
@@ -767,13 +934,13 @@ class Control(Generic, EasyResource):
             distance, nearest = candidates[0]
             return None, (
                 f"nearest seam ({nearest}) is {distance:.0f}mm from the tool at "
-                f"y={tool_y:.0f}, beyond seam_match_tolerance_mm="
+                f"x={tool_x:.0f}, beyond seam_match_tolerance_mm="
                 f"{s.seam_match_tolerance_mm:.0f}; converge first or pass 'seam'"
             )
         if len(in_range) > 1 and in_range[1][0] - in_range[0][0] < SEAM_AMBIGUITY_MM:
             return None, (
                 f"cannot tell the {in_range[0][1]} seam from the {in_range[1][1]} "
-                f"seam at y={tool_y:.0f} ({in_range[0][0]:.0f}mm vs "
+                f"seam at x={tool_x:.0f} ({in_range[0][0]:.0f}mm vs "
                 f"{in_range[1][0]:.0f}mm); pass an explicit 'seam'"
             )
         return in_range[0][1], None
@@ -794,18 +961,18 @@ class Control(Generic, EasyResource):
         await self._tool_move(z=s.top_blade_insert_mm)
         steps.append("insert")
         for chunk in chunks:
-            await self._tool_move(y=chunk)
+            await self._tool_move(x=CUT_SIGN * chunk)
             steps.append("slice_forward")
         await self._tool_move(z=-s.top_blade_insert_mm)
         steps.append("retract")
 
-        await self._tool_move(y=-cut_distance)
+        await self._tool_move(x=-CUT_SIGN * cut_distance)
         steps.append("return_to_center")
 
         await self._tool_move(z=s.top_blade_insert_mm)
         steps.append("insert")
         for chunk in chunks:
-            await self._tool_move(y=-chunk)
+            await self._tool_move(x=-CUT_SIGN * chunk)
             steps.append("slice_back")
         await self._tool_move(z=-(s.top_blade_insert_mm))
         steps.append("retract")
@@ -829,7 +996,7 @@ class Control(Generic, EasyResource):
         await self._tool_move(z=insert_z)
         steps.append("insert")
         await self._tool_move(
-            y=s.side_seam_slice_mm,
+            x=CUT_SIGN * s.side_seam_slice_mm,
             constraints=Constraints(
                 linear_constraint=[
                     LinearConstraint(line_tolerance_mm=s.cut_tolerance_mm)
@@ -869,6 +1036,8 @@ class Control(Generic, EasyResource):
 
         seams = []
         for seam in SEAMS:
+            if seam != SEAM_TOP:
+                await self.move_to_seam(seam)
             converged = await self.converge(seam)
             if not converged.get("success"):
                 return {
@@ -965,5 +1134,5 @@ class Control(Generic, EasyResource):
 
     async def close(self):
         if self.robot_client:
-            self.robot_client.close()
+            await self.robot_client.close()
             self.robot_client = None

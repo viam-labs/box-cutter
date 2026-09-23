@@ -58,19 +58,29 @@ def sample_depth_in_mask(depth_np, mask):
     return float(np.median(valid))
 
 
+def decode_color(images: Sequence[NamedImage]):
+    """The color frame from a get_images() result, as BGR.
+
+    Separate from `decode_color_and_depth` so callers that work purely in image
+    space (the visual-servo loop) can run against a camera that emits no depth.
+    """
+    for img in images:
+        if img.mime_type in (CameraMimeType.JPEG, CameraMimeType.PNG):
+            buf = np.frombuffer(img.data, dtype=np.uint8)
+            color_bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+            if color_bgr is not None:
+                return color_bgr
+    raise ValueError("camera did not return a color (JPEG/PNG) frame")
+
+
 def decode_color_and_depth(images: Sequence[NamedImage]):
     """Split a get_images() result into (bgr_color, depth_np_uint16)."""
-    color_bgr = None
+    color_bgr = decode_color(images)
     depth_np = None
     for img in images:
         if img.mime_type == CameraMimeType.VIAM_RAW_DEPTH:
             depth_np = np.array(img.bytes_to_depth_array(), dtype=np.uint16)
-        elif img.mime_type in (CameraMimeType.JPEG, CameraMimeType.PNG):
-            buf = np.frombuffer(img.data, dtype=np.uint8)
-            color_bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
 
-    if color_bgr is None:
-        raise ValueError("camera did not return a color (JPEG/PNG) frame")
     if depth_np is None:
         raise ValueError("camera did not return a depth (VIAM_RAW_DEPTH) frame")
     return color_bgr, depth_np
