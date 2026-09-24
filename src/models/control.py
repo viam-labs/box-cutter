@@ -266,6 +266,11 @@ class Settings:
     descent_tolerance_mm: float
     cut_tolerance_mm: float
 
+    # Dry run: only read when a command passes `dry_run`.
+    dry_run_clearance_mm: float
+    workspace_min_xyz: Optional[Tuple[float, ...]]
+    workspace_max_xyz: Optional[Tuple[float, ...]]
+
     @property
     def top_seam_span_fraction(self) -> float:
         """Fraction of the box height one top-seam pass covers."""
@@ -294,6 +299,26 @@ class Settings:
             raise ValueError("'arm' is required")
         if not tool_frame:
             raise ValueError("'tool_frame' is required")
+
+        # The bounds are optional, but a half-set or inverted box is a config
+        # mistake that would otherwise surface as every dry-run move failing.
+        workspace_min_xyz = _floats(config, "workspace_min_xyz", None, length=3)
+        workspace_max_xyz = _floats(config, "workspace_max_xyz", None, length=3)
+        if (workspace_min_xyz is None) != (workspace_max_xyz is None):
+            raise ValueError(
+                "'workspace_min_xyz' and 'workspace_max_xyz' must be set together"
+            )
+        if workspace_min_xyz is not None:
+            inverted = [
+                axis
+                for axis, lo, hi in zip("xyz", workspace_min_xyz, workspace_max_xyz)
+                if lo > hi
+            ]
+            if inverted:
+                raise ValueError(
+                    "'workspace_min_xyz' exceeds 'workspace_max_xyz' on "
+                    + ", ".join(inverted)
+                )
         return cls(
             camera_name=camera_name,
             arm_name=arm_name,
@@ -338,6 +363,9 @@ class Settings:
             seam_match_tolerance_mm=_num(config, "seam_match_tolerance_mm", 40.0),
             descent_tolerance_mm=_num(config, "descent_tolerance_mm", 10.0),
             cut_tolerance_mm=_num(config, "cut_tolerance_mm", 3.0),
+            dry_run_clearance_mm=_num(config, "dry_run_clearance_mm", 30.0),
+            workspace_min_xyz=workspace_min_xyz,
+            workspace_max_xyz=workspace_max_xyz,
         )
 
 

@@ -214,6 +214,43 @@ def test_reconfigure_raises_on_missing_dependency():
         )
 
 
+def test_settings_dry_run_defaults():
+    s = Settings.from_config(_config({"camera": "c", "arm": "a", "tool_frame": "t"}))
+    assert s.dry_run_clearance_mm == 30.0
+    assert s.workspace_min_xyz is None
+    assert s.workspace_max_xyz is None
+
+
+def test_settings_reads_workspace_bounds():
+    cfg = _config({
+        "camera": "c", "arm": "a", "tool_frame": "t",
+        "dry_run_clearance_mm": 50,
+        "workspace_min_xyz": [0, -500, 0], "workspace_max_xyz": [900, 500, 700],
+    })
+    s = Settings.from_config(cfg)
+    assert s.dry_run_clearance_mm == 50.0
+    assert isinstance(s.dry_run_clearance_mm, float)
+    assert s.workspace_min_xyz == (0.0, -500.0, 0.0)
+    assert s.workspace_max_xyz == (900.0, 500.0, 700.0)
+
+
+def test_settings_rejects_one_sided_workspace():
+    cfg = _config({
+        "camera": "c", "arm": "a", "tool_frame": "t", "workspace_min_xyz": [0, 0, 0],
+    })
+    with pytest.raises(ValueError, match="set together"):
+        Settings.from_config(cfg)
+
+
+def test_settings_rejects_inverted_workspace():
+    cfg = _config({
+        "camera": "c", "arm": "a", "tool_frame": "t",
+        "workspace_min_xyz": [0, 10, 0], "workspace_max_xyz": [100, 5, 100],
+    })
+    with pytest.raises(ValueError, match="exceeds 'workspace_max_xyz' on y"):
+        Settings.from_config(cfg)
+
+
 def test_reconfigure_keeps_the_open_robot_client():
     ctrl = Control.__new__(Control)
     deps = {
