@@ -9,6 +9,7 @@ from viam.media.video import CameraMimeType
 
 from models.control import (
     BOX_PRESETS,
+    CLOSE_SEAM_RETRACT_MM,
     CUT_SIGN,
     FAR_SEAM_APPROACH_LATERAL_MM,
     SIDE_SEAM_THETA_DEG,
@@ -780,3 +781,52 @@ async def test_full_cut_without_dry_run_adds_no_transforms():
     # Only find_center's two transforms (camera -> world, camera -> tool).
     assert len(ctrl.robot_client.requests) == 2
     assert "dry_run" not in out
+    # every move, blade inserts and retracts included
+    assert len(ctrl.motion.moves) == 29
+
+
+@pytest.mark.asyncio
+async def test_dry_run_top_cut_skips_the_blade_in_and_out():
+    ctrl = await _control_with_box_frame()
+    ctrl.motion.moves.clear()
+    out = await ctrl.do_command({"command": "cut", "seam": SEAM_TOP, "dry_run": True})
+    assert out["completed"] is True
+    assert out["dry_run"] is True
+    assert out["skipped"] == ["top:insert", "top:retract", "top:insert", "top:retract"]
+    # 3 forward chunks, the return to center, 3 back chunks -- all level.
+    assert len(ctrl.motion.moves) == 7
+    assert all(dest.pose.z == 0 for _, dest, _ in ctrl.motion.moves)
+
+
+@pytest.mark.asyncio
+async def test_dry_run_close_retract_keeps_the_extra_pull_back():
+    ctrl = await _control_with_box_frame(attrs={"side_blade_insert_mm": 16})
+    ctrl.motion.moves.clear()
+    out = await ctrl.do_command({"command": "cut", "seam": SEAM_CLOSE, "dry_run": True})
+    assert out["skipped"] == ["close:insert"]
+    slice_move, retract, straighten_blade, straighten_tool = ctrl.motion.moves
+    # The insert was skipped, so only the clearance beyond it is pulled back.
+    assert retract[1].pose.z == pytest.approx(-(CLOSE_SEAM_RETRACT_MM - 16))
+
+
+@pytest.mark.asyncio
+async def test_dry_run_full_cut_lists_every_skipped_move():
+    ctrl = _make_control()
+    await ctrl.do_command({"command": "set_box", "preset": "box_1"})
+    ctrl.camera = _ServoCamera([int(ctrl.settings.blade_x_px)])
+    out = await ctrl.do_command({"command": "full_cut", "dry_run": True})
+    assert out["completed"] is True
+    assert out["skipped"] == [
+        "top:insert", "top:retract", "top:insert", "top:retract",
+        "far:insert", "far:retract",
+        "close:insert",
+    ]
+    assert out["bounds_checked"] is False  # no workspace configured
+
+
+@pytest.mark.asyncio
+async def test_dry_run_is_ignored_on_commands_that_do_not_move():
+    ctrl = _make_control()
+    out = await ctrl.do_command({"command": "set_box", "preset": "box_1", "dry_run": True})
+    assert "dry_run" not in out
+    assert ctrl._dry_run is False

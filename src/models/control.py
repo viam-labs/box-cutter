@@ -70,6 +70,11 @@ SEAM_AMBIGUITY_MM = 5.0
 # meant should be refused rather than executed.
 JOG_MAX_MM = 50.0
 
+# Commands that move the arm and so accept `dry_run`. It is ignored elsewhere.
+DRY_RUN_COMMANDS = frozenset(
+    {"home", "jog", "move_to_center", "move_to_seam", "converge", "cut", "full_cut"}
+)
+
 
 # TODO: remeasure the cut calculations (height_mm for the box)
 # The five boxes measured on the original cell, as
@@ -383,6 +388,10 @@ class Control(Generic, EasyResource):
     robot_client: Optional[RobotClient] = None
     # The command currently driving the arm, so `stop` can cancel it.
     _task: Optional[asyncio.Task] = None
+    # Per-command dry-run state, set by `do_command` for the one running command
+    # (the busy guard means there is only ever one). See `_move`.
+    _dry_run: bool = False
+    _skipped: Optional[list] = None
 
     @classmethod
     def new(
@@ -460,6 +469,9 @@ class Control(Generic, EasyResource):
             raise ValueError(
                 f"busy running {self._task.get_name()!r}; send 'stop' first"
             )
+        dry_run = bool(command.get("dry_run")) and name in DRY_RUN_COMMANDS
+        skipped: list = []
+        self._dry_run, self._skipped = dry_run, skipped
         task = asyncio.create_task(self._dispatch(name, command), name=name)
         self._task = task
         try:
@@ -474,9 +486,18 @@ class Control(Generic, EasyResource):
         finally:
             if self._task is task:
                 self._task = None
+            self._dry_run = False
         if task.cancelled():
             return {"stopped": True, "command": name}
-        return task.result()
+        result = task.result()
+        if dry_run:
+            result = {
+                **result,
+                "dry_run": True,
+                "skipped": skipped,
+                "bounds_checked": self.settings.workspace_min_xyz is not None,
+            }
+        return result
 
     async def _dispatch(
         self, name: str, command: Mapping[str, ValueTypes]
@@ -1029,23 +1050,23 @@ class Control(Generic, EasyResource):
         cut_distance = sum(chunks)
 
         # TODO: double check this extra business
-        await self._tool_move(z=s.top_blade_insert_mm)
+        await self._tool_move(z=s.top_blade_insert_mm, plunge="top:insert")
         steps.append("insert")
         for chunk in chunks:
             await self._tool_move(x=CUT_SIGN * chunk)
             steps.append("slice_forward")
-        await self._tool_move(z=-s.top_blade_insert_mm)
+        await self._tool_move(z=-s.top_blade_insert_mm, plunge="top:retract")
         steps.append("retract")
 
         await self._tool_move(x=-CUT_SIGN * cut_distance)
         steps.append("return_to_center")
 
-        await self._tool_move(z=s.top_blade_insert_mm)
+        await self._tool_move(z=s.top_blade_insert_mm, plunge="top:insert")
         steps.append("insert")
         for chunk in chunks:
             await self._tool_move(x=-CUT_SIGN * chunk)
             steps.append("slice_back")
-        await self._tool_move(z=-(s.top_blade_insert_mm))
+        await self._tool_move(z=-(s.top_blade_insert_mm), plunge="top:retract")
         steps.append("retract")
         return steps
 
@@ -1055,16 +1076,23 @@ class Control(Generic, EasyResource):
         if seam == SEAM_FAR:
             insert_z = s.side_blade_insert_mm
             retract_z = -s.side_blade_insert_mm
+            retract_plunge = "far:retract"
             straighten_theta = s.blade_angle_deg
         else:
             insert_z = s.side_blade_insert_mm
             # The close seam pulls far clear of the box on the way out, not just
             # back out of the tape.
             retract_z = -CLOSE_SEAM_RETRACT_MM
+            if self._dry_run:
+                # The insert was skipped, so only pull back the clearance beyond
+                # it: the tool turns the same distance above its approach.
+                retract_z += s.side_blade_insert_mm
+            # Not a plunge: part of it clears the box, so a dry run keeps it.
+            retract_plunge = None
             straighten_theta = -s.blade_angle_deg
 
         steps = []
-        await self._tool_move(z=insert_z)
+        await self._tool_move(z=insert_z, plunge=f"{seam}:insert")
         steps.append("insert")
         await self._tool_move(
             x=CUT_SIGN * s.side_seam_slice_mm,
@@ -1075,7 +1103,7 @@ class Control(Generic, EasyResource):
             ),
         )
         steps.append("slice")
-        await self._tool_move(z=retract_z)
+        await self._tool_move(z=retract_z, plunge=retract_plunge)
         steps.append("retract")
         await self._move(s.blade_frame, self._blade_pose(theta=straighten_theta))
         steps.append("straighten_blade")
@@ -1170,19 +1198,30 @@ class Control(Generic, EasyResource):
             pose=Pose(x=0, y=0, z=0, o_x=0, o_y=0, o_z=1, theta=theta),
         )
 
-    async def _move(self, component_name, destination, constraints=None):
-        """Every arm move goes through here, so a dry run can gate them all."""
+    async def _move(self, component_name, destination, constraints=None, plunge=None):
+        """Every arm move goes through here, so a dry run can gate them all.
+
+        `plunge` labels a blade insert or retract ("<seam>:<insert|retract>").
+        A dry run records the label and skips the move: the blade never goes
+        in, so there is nothing to pull back out of either.
+        """
+        if self._dry_run and plunge is not None:
+            self._skipped.append(plunge)
+            return
         await self.motion.move(
             component_name=component_name,
             destination=destination,
             constraints=constraints,
         )
 
-    async def _tool_move(self, x=0.0, y=0.0, z=0.0, theta=0.0, constraints=None):
+    async def _tool_move(
+        self, x=0.0, y=0.0, z=0.0, theta=0.0, constraints=None, plunge=None
+    ):
         await self._move(
             self.settings.tool_frame,
             self._tool_pose(x=x, y=y, z=z, theta=theta),
             constraints=constraints,
+            plunge=plunge,
         )
 
     async def _endpoint_world(self, px, z, intr):
