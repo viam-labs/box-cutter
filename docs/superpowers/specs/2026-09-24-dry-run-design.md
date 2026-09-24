@@ -32,7 +32,8 @@ default, so a dry run cannot be left on and make a real cut look like a dry one.
 A dry-run response carries, in addition to the command's normal fields:
 
 - `"dry_run": true`
-- `"skipped"`: the blade insert and retract moves that were not sent, in order
+- `"skipped"`: the blade insert and retract moves that were not sent, in order,
+  across the whole command (so a dry-run `full_cut` lists all three seams')
 - `"bounds_checked"`: `true` if workspace bounds were configured and checked,
   `false` otherwise
 
@@ -169,17 +170,23 @@ Added to `tests/test_control_dispatch.py`, using the fakes it already has
    what it sends today.
 2. A dry-run top-seam `cut` sends no z inserts or retracts, and returns
    `skipped == ["top:insert", "top:retract", "top:insert", "top:retract"]`.
-3. In a dry run, the close-seam retract is `-(40 - side_blade_insert_mm)`.
-4. A dry-run `move_to_center` descends to `standoff + clearance` above the box
+3. In a dry run with `side_blade_insert_mm: 16`, the close-seam retract is
+   `-24`. The test needs a nonzero insert: at the default of `0`, the dry-run
+   and real retracts are both `-40`, and the test would pass without the
+   adjustment.
+4. A dry-run `full_cut` returns
+   `skipped == ["top:insert", "top:retract", "top:insert", "top:retract",
+   "far:insert", "far:retract", "close:insert"]`.
+5. A dry-run `move_to_center` descends to `standoff + clearance` above the box
    top.
-5. A target outside the configured bounds raises before anything is sent to
+6. A target outside the configured bounds raises before anything is sent to
    the motion client.
-6. With no bounds configured, a dry run still runs and returns
+7. With no bounds configured, a dry run still runs and returns
    `bounds_checked: false`.
-7. A frame the fake robot client cannot transform raises an error naming it,
+8. A frame the fake robot client cannot transform raises an error naming it,
    and nothing moves. `_FakeRobotClient` gains an option to raise for a named
    frame; today it never fails.
-8. Config validation rejects only one of the two bounds being set, and a min
+9. Config validation rejects only one of the two bounds being set, and a min
    axis greater than its max.
 
 ## Docs
