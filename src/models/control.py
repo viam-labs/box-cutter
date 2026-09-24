@@ -338,7 +338,7 @@ class Settings:
 
         # Above this, the close-seam retract (a fixed pull-back distance) would
         # move toward the box instead of away from it.
-        side_blade_insert_mm = _num(config, "side_blade_insert_mm", 0.0)  # was 16
+        side_blade_insert_mm = _num(config, "side_blade_insert_mm", 0.0)
         if side_blade_insert_mm > CLOSE_SEAM_RETRACT_MM:
             raise ValueError(
                 "'side_blade_insert_mm' must not exceed the close-seam retract "

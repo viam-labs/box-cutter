@@ -103,7 +103,9 @@ The machine must be configured with:
 
 #### Dry run
 
-Only read when a command passes `"dry_run": true`.
+Only used during a dry run, but validated at config time — an invalid
+`workspace_min_xyz`/`workspace_max_xyz` or a negative `dry_run_clearance_mm`
+blocks the config even if every run is a real one.
 
 | Name | Type | Inclusion | Default | Description |
 |---|---|---|---|---|
@@ -133,8 +135,10 @@ raises a `busy` error. `stop` and `get_properties` are always accepted.
 ### Dry run
 
 `home`, `jog`, `move_to_center`, `move_to_seam`, `converge`, `cut`, and
-`full_cut` accept a `"dry_run": true` key. It must be a JSON boolean; any other
-value raises an error. Other commands ignore it.
+`full_cut` accept a `"dry_run": true` key. A non-boolean `dry_run` is rejected
+on every command that reaches the busy check — only `stop` and
+`get_properties` never look at it. A boolean `dry_run` on any other command
+(e.g. `set_box`, `find_center`, `tool_change`) is accepted but ignored.
 
 The arm runs the real sequence, but:
 
@@ -148,6 +152,11 @@ The arm runs the real sequence, but:
 - if `workspace_min_xyz`/`workspace_max_xyz` are configured, any move whose
   target would leave that volume is refused before it is sent.
 
+`home` and `jog` have no approach standoff, so a dry run does not raise them:
+a dry-run `jog` with `z` moves the blade exactly as a real one does, including
+downward. "Blade held clear" does not apply to either — they are only frame-
+and bounds-checked.
+
 A real run (no `dry_run`, or `dry_run: false`) makes none of these checks and
 issues no extra calls.
 
@@ -160,7 +169,7 @@ The response is the normal result plus:
 ```json
 {
   "dry_run": true,
-  "skipped": ["top:insert", "top:retract", "far:insert", "far:retract", "close:insert"],
+  "skipped": ["top:insert", "top:retract", "top:insert", "top:retract", "far:insert", "far:retract", "close:insert"],
   "bounds_checked": true
 }
 ```
@@ -174,18 +183,23 @@ fields are added.
 - Bounds are in the world frame and cover the tool origin (the knife tip)
   only — not the arm links, the camera, or the blade body. Blade rotations
   aren't checked.
-- The check runs on the dry-run path, which is raised by
-  `dry_run_clearance_mm` and skips the inserts. It does not prove a real run's
-  lower points are in bounds: a real run's knife tip goes
-  `dry_run_clearance_mm` plus the blade insert depth (`top_blade_insert_mm` on
-  the top seam, `side_blade_insert_mm` on a side seam) below the lowest point
-  the dry run checked. Set `workspace_min_xyz`'s z at least that far below the
-  dry run's lowest point, or the real cut falls outside the box the dry run
-  approved.
+- Only move *targets* are checked, not the planned path between them: a
+  free-space move such as `home` or a side-seam approach can swing outside
+  the workspace between its start and end pose without being caught.
+- A dry run checks only the targets of the raised path. A real run's targets
+  sit up to `dry_run_clearance_mm` plus the insert depth lower
+  (`top_blade_insert_mm` on the top seam, `side_blade_insert_mm` on the side
+  seams), and more after `converge`, which settles differently at the real
+  height. For a passing dry run to mean anything about the real one, set
+  `workspace_min_xyz`'s z at least `dry_run_clearance_mm` + the insert depth,
+  plus a margin, **above** the lowest height the knife tip may safely reach.
 - Without `workspace_min_xyz`/`workspace_max_xyz` configured, the dry run
   still runs, logs a warning, and returns `"bounds_checked": false`.
-- Each tool-relative move costs one extra `transform_pose` call during a dry
-  run.
+- The per-move bounds check costs one extra `transform_pose` call, and only
+  when a workspace is configured and the move is tool-relative (not already
+  in the world frame, and not a blade-frame rotation). Separately, the frame
+  check on the first move of each dry run makes 4 `transform_pose` calls, one
+  per configured frame.
 
 **`converge` in a dry run** servos from the raised height. The servo Jacobian
 and pixel settings were tuned at the real standoff, so `iterations` and
