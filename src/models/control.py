@@ -706,10 +706,7 @@ class Control(Generic, EasyResource):
     async def _move_home(self) -> None:
         s = self.settings
         x, y, z = s.home_xyz
-        await self.motion.move(
-            component_name=s.tool_frame,
-            destination=self._world_pose(x, y, z),
-        )
+        await self._move(s.tool_frame, self._world_pose(x, y, z))
 
     async def jog(self, command: Mapping[str, ValueTypes]) -> Mapping[str, ValueTypes]:
         """Step the tool in its own frame and report the world pose either side.
@@ -779,12 +776,12 @@ class Control(Generic, EasyResource):
             return result
         s = self.settings
         box = self._box_data
-        await self.motion.move(
-            component_name=s.tool_frame,
-            destination=self._tool_pose(
-                x=box.tool_x_mm, # 383
-                y=box.tool_y_mm, # -3
-                z=box.knife_tip_to_top_mm - s.center_standoff_mm, # 285 - 20 = 265
+        await self._move(
+            s.tool_frame,
+            self._tool_pose(
+                x=box.tool_x_mm,
+                y=box.tool_y_mm,
+                z=box.knife_tip_to_top_mm - s.center_standoff_mm,
             ),
             constraints=Constraints(
                 linear_constraint=[
@@ -834,28 +831,21 @@ class Control(Generic, EasyResource):
             blade_theta = s.blade_angle_deg
             approach_lateral = 0.0
 
-        await self.motion.move(
-            component_name=s.tool_frame,
-            destination=self._world_pose(
+        await self._move(
+            s.tool_frame,
+            self._world_pose(
                 x=seam_x,
                 y=box.center_y_mm,
                 z=box.center_z_mm + s.side_seam_z_offset_mm,
                 theta=SIDE_SEAM_THETA_DEG,
             ),
         )
-        await self.motion.move(
-            component_name=s.blade_frame,
-            destination=self._blade_pose(theta=blade_theta),
-        )
-        await self.motion.move(
-            component_name=s.tool_frame,
-            destination=self._tool_pose(
-                # Back off along the seam, so the stroke that follows cuts
-                # through its whole length rather than starting mid-tape.
-                x=-CUT_SIGN * s.seam_offset_fraction * box.flap_width_mm,
-                y=approach_lateral,
-                z=0.0,
-            ),
+        await self._move(s.blade_frame, self._blade_pose(theta=blade_theta))
+        await self._tool_move(
+            # Back off along the seam, so the stroke that follows cuts
+            # through its whole length rather than starting mid-tape.
+            x=-CUT_SIGN * s.seam_offset_fraction * box.flap_width_mm,
+            y=approach_lateral,
         )
 
     # --- converge -------------------------------------------------------------
@@ -900,10 +890,7 @@ class Control(Generic, EasyResource):
         while iterations < s.converge_max_iterations:
             # A zero step is the script's no-op first move; skip the round trip.
             if delta != (0.0, 0.0):
-                await self.motion.move(
-                    component_name=s.tool_frame,
-                    destination=self._tool_pose(x=delta[0], y=delta[1], z=0.0),
-                )
+                await self._tool_move(x=delta[0], y=delta[1])
             iterations += 1
 
             images, _ = await self.camera.get_images()
@@ -1090,10 +1077,7 @@ class Control(Generic, EasyResource):
         steps.append("slice")
         await self._tool_move(z=retract_z)
         steps.append("retract")
-        await self.motion.move(
-            component_name=s.blade_frame,
-            destination=self._blade_pose(theta=straighten_theta),
-        )
+        await self._move(s.blade_frame, self._blade_pose(theta=straighten_theta))
         steps.append("straighten_blade")
         if seam == SEAM_CLOSE:
             await self._tool_move(theta=CLOSE_SEAM_FINAL_THETA_DEG)
@@ -1186,10 +1170,18 @@ class Control(Generic, EasyResource):
             pose=Pose(x=0, y=0, z=0, o_x=0, o_y=0, o_z=1, theta=theta),
         )
 
-    async def _tool_move(self, x=0.0, y=0.0, z=0.0, theta=0.0, constraints=None):
+    async def _move(self, component_name, destination, constraints=None):
+        """Every arm move goes through here, so a dry run can gate them all."""
         await self.motion.move(
-            component_name=self.settings.tool_frame,
-            destination=self._tool_pose(x=x, y=y, z=z, theta=theta),
+            component_name=component_name,
+            destination=destination,
+            constraints=constraints,
+        )
+
+    async def _tool_move(self, x=0.0, y=0.0, z=0.0, theta=0.0, constraints=None):
+        await self._move(
+            self.settings.tool_frame,
+            self._tool_pose(x=x, y=y, z=z, theta=theta),
             constraints=constraints,
         )
 

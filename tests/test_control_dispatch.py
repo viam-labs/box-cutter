@@ -766,3 +766,17 @@ async def test_stop_with_nothing_running_still_halts_the_arm():
     out = await ctrl.do_command({"command": "stop"})
     assert out == {"stopped": True, "interrupted": None}
     assert ctrl.arm.stops == 1
+
+
+# --- dry run ------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_full_cut_without_dry_run_adds_no_transforms():
+    ctrl = _make_control()
+    await ctrl.do_command({"command": "set_box", "preset": "box_1"})
+    ctrl.camera = _ServoCamera([int(ctrl.settings.blade_x_px)])
+    out = await ctrl.do_command({"command": "full_cut"})
+    assert out["completed"] is True
+    # Only find_center's two transforms (camera -> world, camera -> tool).
+    assert len(ctrl.robot_client.requests) == 2
+    assert "dry_run" not in out
