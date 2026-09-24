@@ -936,7 +936,7 @@ async def test_dry_run_refuses_a_world_target_outside_the_workspace():
     ctrl = _make_control(attrs={
         "workspace_min_xyz": [0, 0, 0], "workspace_max_xyz": [100, 100, 100],
     })
-    with pytest.raises(ValueError, match=r"leaves the workspace: x=400\.0"):
+    with pytest.raises(ValueError, match=r"leaves the workspace .*: x=400\.0"):
         await ctrl.do_command({"command": "home", "dry_run": True})
     assert ctrl.motion.moves == []
 
@@ -944,8 +944,9 @@ async def test_dry_run_refuses_a_world_target_outside_the_workspace():
 @pytest.mark.asyncio
 async def test_dry_run_checks_relative_moves_in_world_coordinates():
     # The fake adds TOOL_OFFSET (1, 2, 3) to a tool-frame pose sent to world,
-    # so a 10 mm jog along tool x lands at world x = 11. Without the transform
-    # the check would see x = 10.
+    # so a 10 mm jog along tool x lands at world x = 11 -- a property of the
+    # fake, not the cell: a real client also rotates the step by the tool's
+    # orientation. Without the transform the check would see x = 10.
     ctrl = _make_control(attrs={
         "workspace_min_xyz": [0, 0, 0], "workspace_max_xyz": [5, 100, 100],
     })
@@ -971,3 +972,21 @@ async def test_real_run_ignores_the_workspace():
     })
     await ctrl.do_command({"command": "home"})
     assert len(ctrl.motion.moves) == 1
+
+
+@pytest.mark.asyncio
+async def test_dry_run_does_not_bounds_check_blade_rotations():
+    ctrl = await _control_with_box_frame(attrs=_WIDE)
+    await ctrl.do_command({"command": "move_to_seam", "seam": SEAM_FAR, "dry_run": True})
+    blade_requests = [
+        pif for pif, _ in ctrl.robot_client.requests if pif.reference_frame == "blade"
+    ]
+    assert len(blade_requests) == 1  # the frame check only, not the blade tilt
+
+
+@pytest.mark.asyncio
+async def test_real_run_jog_with_a_workspace_makes_no_transforms():
+    ctrl = _make_control(attrs=_WIDE)
+    await ctrl.do_command({"command": "jog", "x": 10})
+    assert len(ctrl.motion.moves) == 1
+    assert ctrl.robot_client.requests == []

@@ -1307,11 +1307,16 @@ class Control(Generic, EasyResource):
     async def _check_bounds(self, component_name: str, destination: PoseInFrame) -> None:
         """Refuse a dry-run move whose target leaves the configured workspace.
 
-        A relative destination (tool or blade frame) is transformed to the world
-        frame first, which is exactly where the move will put that frame.
+        A tool-relative destination is transformed to the world frame first,
+        which is exactly where the move will put the tool. Blade rotations are
+        not checked (see below).
         """
         s = self.settings
         if s.workspace_min_xyz is None:
+            return
+        if destination.reference_frame == s.blade_frame:
+            # A blade move is a rotation about the blade origin: that point
+            # stays where it is, so there is nothing new to check.
             return
         if destination.reference_frame == s.world_frame:
             pose = destination.pose
@@ -1329,7 +1334,8 @@ class Control(Generic, EasyResource):
         ]
         if outside:
             raise ValueError(
-                f"dry run: {component_name} move leaves the workspace: "
+                f"dry run: {component_name} move leaves the workspace "
+                "(world frame; workspace_min_xyz/workspace_max_xyz): "
                 + "; ".join(outside)
             )
 
