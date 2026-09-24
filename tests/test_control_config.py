@@ -251,6 +251,14 @@ def test_settings_rejects_inverted_workspace():
         Settings.from_config(cfg)
 
 
+def test_settings_rejects_negative_dry_run_clearance():
+    cfg = _config({
+        "camera": "c", "arm": "a", "tool_frame": "t", "dry_run_clearance_mm": -5,
+    })
+    with pytest.raises(ValueError, match="must not be negative"):
+        Settings.from_config(cfg)
+
+
 def test_reconfigure_keeps_the_open_robot_client():
     ctrl = Control.__new__(Control)
     deps = {
