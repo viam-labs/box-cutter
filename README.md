@@ -13,7 +13,7 @@ This module provides the following model(s):
 
 - [`viam-labs:box-cutter:control`](viam-labs_box-cutter_control.md) — locate a box
   and cut its top, far, and close seams. Supports the `set_box`, `home`,
-  `find_center`, `move_to_center`, `converge`, `cut`, and `full_cut` commands.
+  `find_center`, `move_to_center`, `converge`, `cut`, `full_cut`, and `stop` commands.
 
 ## Development
 

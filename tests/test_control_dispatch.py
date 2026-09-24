@@ -1,3 +1,4 @@
+import asyncio
 import numpy as np
 import cv2
 import pytest
@@ -6,7 +7,25 @@ from viam.proto.app.robot import ComponentConfig
 from viam.proto.common import Pose, PoseInFrame
 from viam.media.video import CameraMimeType
 
-from models.control import Control, Settings, SEAM_CLOSE, SEAM_FAR, SEAM_TOP
+from models.control import (
+    BOX_PRESETS,
+    CUT_SIGN,
+    FAR_SEAM_APPROACH_LATERAL_MM,
+    SIDE_SEAM_THETA_DEG,
+    Control,
+    Settings,
+    SEAM_CLOSE,
+    SEAM_FAR,
+    SEAM_TOP,
+)
+
+# find_center is set_box-only until automatic detection returns; these tests
+# describe the detection path and come back with it.
+DETECTION_DISABLED = pytest.mark.skip(
+    reason="automatic detection is disabled; find_center is set_box-only"
+)
+
+BOX_1 = {"depth_mm": 535, "u": 360, "v": 223, "flap_width_mm": 120, "box_height_mm": 280}
 
 
 def _config(attrs):
@@ -72,10 +91,10 @@ class _FakeRobotClient:
 
 
 class _RecordingMotion:
-    """Records every move; reports the tool parked wherever `pose` says."""
-    def __init__(self, tool_y=0.0):
+    """Records every move; reports the tool parked at world x = `tool_x`."""
+    def __init__(self, tool_x=0.0):
         self.moves = []
-        self.tool_y = tool_y
+        self.tool_x = tool_x
 
     async def move(self, component_name, destination, **kw):
         self.moves.append((component_name, destination, kw.get("constraints")))
@@ -84,7 +103,7 @@ class _RecordingMotion:
     async def get_pose(self, component_name, destination_frame, **kw):
         return PoseInFrame(
             reference_frame=destination_frame,
-            pose=Pose(x=0, y=self.tool_y, z=0, o_x=0, o_y=0, o_z=-1, theta=0),
+            pose=Pose(x=self.tool_x, y=0, z=0, o_x=0, o_y=0, o_z=-1, theta=0),
         )
 
     @property
@@ -124,12 +143,13 @@ def _make_control(attrs=None, motion=None):
     ctrl.arm = None
     ctrl.robot_client = _FakeRobotClient()
     ctrl._box_override = None
-    ctrl._box_frame = None
+    ctrl._box_data = None
     return ctrl
 
 
 # --- find_center --------------------------------------------------------------
 
+@DETECTION_DISABLED
 @pytest.mark.asyncio
 async def test_find_center_returns_world_pose():
     ctrl = _make_control()
@@ -146,24 +166,35 @@ async def test_find_center_returns_world_pose():
 
 
 @pytest.mark.asyncio
-async def test_find_center_derives_box_frame_from_ground_truth():
+async def test_find_center_requires_set_box():
     ctrl = _make_control()
+    with pytest.raises(ValueError, match="set_box"):
+        await ctrl.do_command({"command": "find_center"})
+
+
+@pytest.mark.asyncio
+async def test_find_center_derives_box_frame_from_set_box():
+    ctrl = _make_control()
+    await ctrl.do_command({"command": "set_box", **BOX_1})
     out = await ctrl.do_command({"command": "find_center"})
     s = ctrl.settings
     box = out["box_frame"]
+    assert (out["u"], out["v"]) == (BOX_1["u"], BOX_1["v"])
+    assert out["depth_mm"] == pytest.approx(BOX_1["depth_mm"])
+    # The fake world transform passes the camera-frame point straight through.
+    assert out["world_pose"]["x"] == pytest.approx(out["camera_frame_xyz"]["x"])
+    assert out["world_pose"]["z"] == pytest.approx(BOX_1["depth_mm"])
     # The tool-frame transform adds a known offset to the camera-frame z.
-    knife_to_top = 700.0 + _FakeRobotClient.TOOL_OFFSET[2]
+    knife_to_top = BOX_1["depth_mm"] + _FakeRobotClient.TOOL_OFFSET[2]
     assert box["knife_tip_to_top_mm"] == pytest.approx(knife_to_top, abs=1)
     assert box["center_z_mm"] == pytest.approx(
         s.knife_tip_to_table_mm - knife_to_top - s.base_plate_height_mm, abs=1
     )
-    # Height mirrors the box about the stopper: 2 * |stopper_y - center_y|.
-    assert box["height_mm"] == pytest.approx(
-        2 * abs(s.stopper_y_mm - out["world_pose"]["y"]), abs=1
-    )
-    assert box["flap_width_mm"] is None
+    assert box["height_mm"] == pytest.approx(BOX_1["box_height_mm"])
+    assert box["flap_width_mm"] == pytest.approx(BOX_1["flap_width_mm"])
 
 
+@DETECTION_DISABLED
 @pytest.mark.asyncio
 async def test_find_center_reports_not_found_on_blank_frame():
     ctrl = _make_control()
@@ -173,6 +204,7 @@ async def test_find_center_reports_not_found_on_blank_frame():
     assert "reason" in out
 
 
+@DETECTION_DISABLED
 @pytest.mark.asyncio
 async def test_find_center_raises_on_depth_color_mismatch():
     ctrl = _make_control()
@@ -239,20 +271,31 @@ async def test_do_command_rejects_unknown_seam():
 @pytest.mark.asyncio
 async def test_set_box_stores_explicit_measurements():
     ctrl = _make_control()
-    out = await ctrl.do_command({
-        "command": "set_box", "depth_mm": 535, "u": 380, "v": 242, "flap_width_mm": 120,
-    })
+    out = await ctrl.do_command({"command": "set_box", **BOX_1})
     assert out["box"] == {
-        "depth_mm": 535.0, "u": 380, "v": 242, "flap_width_mm": 120.0,
+        "depth_mm": 535.0, "u": 360, "v": 223, "flap_width_mm": 120.0,
+        "box_height_mm": 280.0,
     }
 
 
+@pytest.mark.parametrize("preset", [
+    "box_1",
+    *(
+        pytest.param(p, marks=pytest.mark.xfail(
+            strict=True, raises=ValueError,
+            reason="box_height_mm not yet measured for this preset (-1)",
+        ))
+        for p in sorted(BOX_PRESETS) if p != "box_1"
+    ),
+])
 @pytest.mark.asyncio
-async def test_set_box_accepts_a_preset():
+async def test_set_box_accepts_a_preset(preset):
     ctrl = _make_control()
-    out = await ctrl.do_command({"command": "set_box", "preset": "box_3"})
-    assert out["box"]["depth_mm"] == pytest.approx(479.0)
-    assert out["box"]["flap_width_mm"] == pytest.approx(80.0)
+    out = await ctrl.do_command({"command": "set_box", "preset": preset})
+    depth_mm, _, _, flap_width_mm, box_height_mm = BOX_PRESETS[preset]
+    assert out["box"]["depth_mm"] == pytest.approx(depth_mm)
+    assert out["box"]["flap_width_mm"] == pytest.approx(flap_width_mm)
+    assert out["box"]["box_height_mm"] == pytest.approx(box_height_mm)
 
 
 @pytest.mark.asyncio
@@ -274,23 +317,21 @@ async def test_set_box_rejects_nonpositive_values():
     ctrl = _make_control()
     with pytest.raises(ValueError, match="must be positive"):
         await ctrl.do_command({
-            "command": "set_box", "depth_mm": 0, "u": 1, "v": 2, "flap_width_mm": 10,
+            "command": "set_box", **BOX_1, "depth_mm": 0,
         })
 
 
 @pytest.mark.asyncio
-async def test_set_box_override_replaces_detected_center():
+async def test_set_box_clear_drops_the_override():
     ctrl = _make_control()
-    await ctrl.do_command({
-        "command": "set_box", "depth_mm": 535, "u": 380, "v": 242, "flap_width_mm": 120,
-    })
-    out = await ctrl.do_command({"command": "find_center"})
-    assert out["override_applied"] is True
-    assert (out["u"], out["v"]) == (380, 242)
-    assert out["depth_mm"] == pytest.approx(535.0)
-    assert out["box_frame"]["flap_width_mm"] == pytest.approx(120.0)
+    await ctrl.do_command({"command": "set_box", "preset": "box_1"})
+    cleared = await ctrl.do_command({"command": "set_box", "clear": True})
+    assert cleared["cleared"] is True
+    with pytest.raises(ValueError, match="set_box"):
+        await ctrl.do_command({"command": "find_center"})
 
 
+@DETECTION_DISABLED
 @pytest.mark.asyncio
 async def test_set_box_clear_restores_detection():
     ctrl = _make_control()
@@ -305,10 +346,11 @@ async def test_set_box_clear_restores_detection():
 @pytest.mark.asyncio
 async def test_set_box_invalidates_the_stored_box_frame():
     ctrl = _make_control()
-    await ctrl.do_command({"command": "find_center"})
-    assert ctrl._box_frame is not None
     await ctrl.do_command({"command": "set_box", "preset": "box_1"})
-    assert ctrl._box_frame is None
+    await ctrl.do_command({"command": "find_center"})
+    assert ctrl._box_data is not None
+    await ctrl.do_command({"command": "set_box", **BOX_1})
+    assert ctrl._box_data is None
 
 
 # --- home / move_to_center ----------------------------------------------------
@@ -321,13 +363,16 @@ async def test_home_moves_tool_to_configured_pose():
     comp, dest, _ = ctrl.motion.moves[0]
     assert comp == "tool"
     assert dest.reference_frame == "world"
-    assert (dest.pose.x, dest.pose.y, dest.pose.z) == pytest.approx((-4, -551, 470))
+    assert (dest.pose.x, dest.pose.y, dest.pose.z) == pytest.approx(
+        ctrl.settings.home_xyz
+    )
     assert dest.pose.o_z == -1
 
 
 @pytest.mark.asyncio
 async def test_move_to_center_descends_in_the_tool_frame():
     ctrl = _make_control()
+    await ctrl.do_command({"command": "set_box", "preset": "box_1"})
     out = await ctrl.do_command({"command": "move_to_center"})
     assert out["moved"] is True
     comp, dest, constraints = ctrl.motion.moves[-1]
@@ -339,6 +384,7 @@ async def test_move_to_center_descends_in_the_tool_frame():
     assert constraints is not None
 
 
+@DETECTION_DISABLED
 @pytest.mark.asyncio
 async def test_move_to_center_skips_move_when_not_found():
     ctrl = _make_control()
@@ -398,7 +444,8 @@ async def test_converge_requires_a_box_frame():
 @pytest.mark.asyncio
 async def test_converge_succeeds_once_the_seam_is_under_the_blade():
     ctrl = await _control_with_box_frame()
-    ctrl.camera = _ServoCamera([360, 350, 339])
+    b = int(ctrl.settings.blade_x_px)
+    ctrl.camera = _ServoCamera([b + 21, b + 11, b])
     out = await ctrl.do_command({"command": "converge"})
     assert out["success"] is True
     assert out["seam"] == SEAM_TOP
@@ -410,7 +457,7 @@ async def test_converge_succeeds_once_the_seam_is_under_the_blade():
 async def test_converge_converges_immediately_without_moving():
     ctrl = await _control_with_box_frame()
     ctrl.motion.moves.clear()
-    ctrl.camera = _ServoCamera([339])
+    ctrl.camera = _ServoCamera([int(ctrl.settings.blade_x_px)])
     out = await ctrl.do_command({"command": "converge"})
     assert out["success"] is True
     assert out["iterations"] == 1
@@ -421,15 +468,17 @@ async def test_converge_converges_immediately_without_moving():
 async def test_converge_steps_the_tool_toward_the_seam():
     ctrl = await _control_with_box_frame()
     ctrl.motion.moves.clear()
-    ctrl.camera = _ServoCamera([360, 339])
+    b = int(ctrl.settings.blade_x_px)
+    ctrl.camera = _ServoCamera([b + 21, b])
     out = await ctrl.do_command({"command": "converge"})
     assert out["success"] is True
     comp, dest, _ = ctrl.motion.moves[0]
     assert comp == "tool"
     assert dest.reference_frame == "tool"
-    # Seam right of the blade (+21px) with a negative-diagonal Jacobian and
-    # gain 0.2 -> a positive few-mm step.
-    assert 0 < dest.pose.x < 10
+    # Seam right of the blade (+21px). With the default Jacobian only tool y
+    # moves the seam (+3.2 px/mm), so gain 0.2 gives a small negative y step.
+    assert dest.pose.x == pytest.approx(0.0)
+    assert -10 < dest.pose.y < 0
 
 
 @pytest.mark.asyncio
@@ -453,40 +502,40 @@ async def test_converge_gives_up_when_no_seam_is_visible():
 
 
 @pytest.mark.asyncio
-async def test_converge_stages_the_far_side_seam_before_servoing():
+async def test_move_to_seam_stages_the_far_side_seam():
     ctrl = await _control_with_box_frame()
     ctrl.motion.moves.clear()
-    ctrl.camera = _ServoCamera([339])
-    out = await ctrl.do_command({"command": "converge", "seam": SEAM_FAR})
-    assert out["success"] is True
+    out = await ctrl.do_command({"command": "move_to_seam", "seam": SEAM_FAR})
+    assert out["moved"] is True
 
-    stage, blade, offset = ctrl.motion.moves[:3]
-    s, box = ctrl.settings, ctrl._box_frame
+    stage, blade, offset = ctrl.motion.moves
+    s, box = ctrl.settings, ctrl._box_data
     assert stage[1].reference_frame == "world"
-    assert stage[1].pose.y == pytest.approx(s.stopper_y_mm - box.height_mm)
+    assert stage[1].pose.x == pytest.approx(s.stopper_x_mm + box.height_mm)
+    assert stage[1].pose.y == pytest.approx(box.center_y_mm)
     assert stage[1].pose.z == pytest.approx(box.center_z_mm + s.side_seam_z_offset_mm)
-    assert stage[1].pose.theta == pytest.approx(-90)
+    assert stage[1].pose.theta == pytest.approx(SIDE_SEAM_THETA_DEG)
     assert blade[0] == "blade"
     assert blade[1].pose.theta == pytest.approx(-s.blade_angle_deg)
-    assert offset[1].pose.y == pytest.approx(
-        -s.seam_offset_fraction * box.flap_width_mm
+    assert offset[1].pose.x == pytest.approx(
+        -CUT_SIGN * s.seam_offset_fraction * box.flap_width_mm
     )
-    assert offset[1].pose.x == pytest.approx(5.0)
+    assert offset[1].pose.y == pytest.approx(FAR_SEAM_APPROACH_LATERAL_MM)
 
 
 @pytest.mark.asyncio
-async def test_converge_stages_the_close_side_seam_at_the_stopper():
+async def test_move_to_seam_stages_the_close_side_seam_at_the_stopper():
     ctrl = await _control_with_box_frame()
     ctrl.motion.moves.clear()
-    ctrl.camera = _ServoCamera([339])
-    out = await ctrl.do_command({"command": "converge", "seam": SEAM_CLOSE})
-    assert out["success"] is True
-    stage, blade, offset = ctrl.motion.moves[:3]
-    assert stage[1].pose.y == pytest.approx(ctrl.settings.stopper_y_mm)
+    out = await ctrl.do_command({"command": "move_to_seam", "seam": SEAM_CLOSE})
+    assert out["moved"] is True
+    stage, blade, offset = ctrl.motion.moves
+    assert stage[1].pose.x == pytest.approx(ctrl.settings.stopper_x_mm)
     assert blade[1].pose.theta == pytest.approx(ctrl.settings.blade_angle_deg)
-    assert offset[1].pose.x == pytest.approx(0.0)
+    assert offset[1].pose.y == pytest.approx(0.0)
 
 
+@DETECTION_DISABLED
 @pytest.mark.asyncio
 async def test_converge_refuses_a_side_seam_without_flap_width():
     ctrl = _make_control()
@@ -495,16 +544,6 @@ async def test_converge_refuses_a_side_seam_without_flap_width():
     out = await ctrl.do_command({"command": "converge", "seam": SEAM_FAR})
     assert out["success"] is False
     assert "flap width" in out["reason"]
-
-
-@pytest.mark.asyncio
-async def test_converge_refuses_a_side_seam_without_blade_frame():
-    ctrl = _make_control(attrs={"blade_frame": ""})
-    await ctrl.do_command({"command": "set_box", "preset": "box_1"})
-    await ctrl.do_command({"command": "find_center"})
-    out = await ctrl.do_command({"command": "converge", "seam": SEAM_CLOSE})
-    assert out["success"] is False
-    assert "blade_frame" in out["reason"]
 
 
 # --- cut ----------------------------------------------------------------------
@@ -529,26 +568,26 @@ async def test_cut_top_slices_both_halves_from_the_center():
         "insert", "slice_back", "slice_back", "slice_back", "retract",
     ]
 
-    s, box = ctrl.settings, ctrl._box_frame
+    s, box = ctrl.settings, ctrl._box_data
     poses = [dest.pose for _, dest, _ in ctrl.motion.moves]
-    assert poses[0].z == pytest.approx(s.top_blade_insert_mm + 2.0)
-    # The three forward chunks sum to the configured span...
-    assert sum(p.y for p in poses[1:4]) == pytest.approx(
-        s.top_seam_span_fraction * box.height_mm
-    )
+    span = CUT_SIGN * s.top_seam_span_fraction * box.height_mm
+    assert poses[0].z == pytest.approx(s.top_blade_insert_mm)
+    # The three forward chunks sum to the configured span (past the box edge,
+    # on purpose, to clear the flaps)...
+    assert sum(p.x for p in poses[1:4]) == pytest.approx(span)
     # ...and the return move undoes exactly that.
-    assert poses[5].y == pytest.approx(-s.top_seam_span_fraction * box.height_mm)
-    assert sum(p.y for p in poses[7:10]) == pytest.approx(
-        -s.top_seam_span_fraction * box.height_mm
-    )
-    assert poses[-1].z == pytest.approx(-(s.top_blade_insert_mm + 3.0))
+    assert poses[5].x == pytest.approx(-span)
+    assert sum(p.x for p in poses[7:10]) == pytest.approx(-span)
+    assert poses[-1].z == pytest.approx(-s.top_blade_insert_mm)
     # The top seam is cut freehand; only the side seams are line-constrained.
     assert all(c is None for _, _, c in ctrl.motion.moves)
 
 
 @pytest.mark.asyncio
 async def test_cut_far_seam_slices_under_a_linear_constraint():
-    ctrl = await _control_with_box_frame()
+    # side_blade_insert_mm defaults to 0 while it is being tuned; set it so the
+    # insert and retract are distinguishable.
+    ctrl = await _control_with_box_frame(attrs={"side_blade_insert_mm": 16})
     ctrl.motion.moves.clear()
     out = await ctrl.do_command({"command": "cut", "seam": SEAM_FAR})
     assert out["completed"] is True
@@ -557,7 +596,7 @@ async def test_cut_far_seam_slices_under_a_linear_constraint():
     s = ctrl.settings
     insert, slice_move, retract, straighten = ctrl.motion.moves
     assert insert[1].pose.z == pytest.approx(s.side_blade_insert_mm)
-    assert slice_move[1].pose.y == pytest.approx(s.side_seam_slice_mm)
+    assert slice_move[1].pose.x == pytest.approx(CUT_SIGN * s.side_seam_slice_mm)
     assert slice_move[2] is not None  # linear constraint on the cut itself
     assert retract[1].pose.z == pytest.approx(-s.side_blade_insert_mm)
     assert straighten[0] == "blade"
@@ -565,8 +604,8 @@ async def test_cut_far_seam_slices_under_a_linear_constraint():
 
 
 @pytest.mark.asyncio
-async def test_cut_close_seam_digs_deeper_and_retracts_clear():
-    ctrl = await _control_with_box_frame()
+async def test_cut_close_seam_retracts_clear():
+    ctrl = await _control_with_box_frame(attrs={"side_blade_insert_mm": 16})
     ctrl.motion.moves.clear()
     out = await ctrl.do_command({"command": "cut", "seam": SEAM_CLOSE})
     assert out["steps"] == [
@@ -574,7 +613,7 @@ async def test_cut_close_seam_digs_deeper_and_retracts_clear():
     ]
     s = ctrl.settings
     moves = ctrl.motion.moves
-    assert moves[0][1].pose.z == pytest.approx(s.side_blade_insert_mm + 2.0)
+    assert moves[0][1].pose.z == pytest.approx(s.side_blade_insert_mm)
     assert moves[2][1].pose.z == pytest.approx(-40.0)
     assert moves[3][1].pose.theta == pytest.approx(-s.blade_angle_deg)
     assert moves[4][1].pose.theta == pytest.approx(90.0)
@@ -586,7 +625,7 @@ async def test_cut_close_seam_digs_deeper_and_retracts_clear():
 async def test_cut_infers_the_top_seam_from_the_tool_pose():
     motion = _RecordingMotion()
     ctrl = await _control_with_box_frame(motion=motion)
-    motion.tool_y = ctrl._box_frame.center_y_mm
+    motion.tool_x = ctrl._box_data.center_x_mm
     out = await ctrl.do_command({"command": "cut"})
     assert out["seam"] == SEAM_TOP
 
@@ -595,7 +634,7 @@ async def test_cut_infers_the_top_seam_from_the_tool_pose():
 async def test_cut_infers_the_far_seam_from_the_tool_pose():
     motion = _RecordingMotion()
     ctrl = await _control_with_box_frame(motion=motion)
-    motion.tool_y = ctrl.settings.stopper_y_mm - ctrl._box_frame.height_mm
+    motion.tool_x = ctrl.settings.stopper_x_mm + ctrl._box_data.height_mm
     out = await ctrl.do_command({"command": "cut"})
     assert out["seam"] == SEAM_FAR
 
@@ -604,14 +643,14 @@ async def test_cut_infers_the_far_seam_from_the_tool_pose():
 async def test_cut_infers_the_close_seam_from_the_tool_pose():
     motion = _RecordingMotion()
     ctrl = await _control_with_box_frame(motion=motion)
-    motion.tool_y = ctrl.settings.stopper_y_mm + 3
+    motion.tool_x = ctrl.settings.stopper_x_mm + 3
     out = await ctrl.do_command({"command": "cut"})
     assert out["seam"] == SEAM_CLOSE
 
 
 @pytest.mark.asyncio
 async def test_cut_refuses_when_the_tool_is_at_no_seam():
-    motion = _RecordingMotion(tool_y=5000.0)
+    motion = _RecordingMotion(tool_x=5000.0)
     ctrl = await _control_with_box_frame(motion=motion)
     motion.moves.clear()
     out = await ctrl.do_command({"command": "cut"})
@@ -626,9 +665,9 @@ async def test_cut_refuses_when_two_seams_are_equally_close():
     ctrl = await _control_with_box_frame(
         motion=motion, attrs={"seam_match_tolerance_mm": 300}
     )
-    s, box = ctrl.settings, ctrl._box_frame
+    s, box = ctrl.settings, ctrl._box_data
     # Halfway between the close seam and the top seam.
-    motion.tool_y = (s.stopper_y_mm + box.center_y_mm) / 2
+    motion.tool_x = (s.stopper_x_mm + box.center_x_mm) / 2
     motion.moves.clear()
     out = await ctrl.do_command({"command": "cut"})
     assert out["completed"] is False
@@ -638,26 +677,11 @@ async def test_cut_refuses_when_two_seams_are_equally_close():
 
 # --- full_cut -----------------------------------------------------------------
 
-class _FullCutCamera:
-    """A box frame for the one detection, then an already-aligned seam."""
-    def __init__(self):
-        self._first = True
-
-    async def get_images(self):
-        if self._first:
-            self._first = False
-            return _images_with_box(), None
-        return _frame_with_seam_at(339), None
-
-    async def get_properties(self):
-        return _Props()
-
-
 @pytest.mark.asyncio
 async def test_full_cut_runs_home_center_and_all_three_seams():
     ctrl = _make_control()
     await ctrl.do_command({"command": "set_box", "preset": "box_1"})
-    ctrl.camera = _FullCutCamera()
+    ctrl.camera = _ServoCamera([int(ctrl.settings.blade_x_px)])
     out = await ctrl.do_command({"command": "full_cut"})
     assert out["completed"] is True
     assert out["steps"] == [
@@ -670,6 +694,7 @@ async def test_full_cut_runs_home_center_and_all_three_seams():
     assert [s["seam"] for s in out["seams"]] == [SEAM_TOP, SEAM_FAR, SEAM_CLOSE]
 
 
+@DETECTION_DISABLED
 @pytest.mark.asyncio
 async def test_full_cut_aborts_when_no_box():
     ctrl = _make_control()
@@ -691,3 +716,53 @@ async def test_full_cut_stops_at_the_seam_that_fails_to_converge():
     assert out["failed_at"] == SEAM_TOP
     assert out["stage"] == "converge"
     assert out["steps"] == ["home", "move_to_center"]
+
+
+# --- stop ---------------------------------------------------------------------
+
+class _BlockingMotion(_RecordingMotion):
+    """A move that never finishes on its own, like a long cut stroke."""
+    def __init__(self):
+        super().__init__()
+        self.started = asyncio.Event()
+
+    async def move(self, component_name, destination, **kw):
+        self.moves.append((component_name, destination, kw.get("constraints")))
+        self.started.set()
+        await asyncio.Event().wait()
+
+
+class _FakeArm:
+    def __init__(self):
+        self.stops = 0
+
+    async def stop(self, **kw):
+        self.stops += 1
+
+
+@pytest.mark.asyncio
+async def test_stop_interrupts_a_running_command_and_halts_the_arm():
+    motion = _BlockingMotion()
+    ctrl = _make_control(motion=motion)
+    ctrl.arm = _FakeArm()
+    running = asyncio.create_task(ctrl.do_command({"command": "home"}))
+    await motion.started.wait()
+
+    with pytest.raises(ValueError, match="busy running 'home'"):
+        await ctrl.do_command({"command": "jog", "x": 1})
+
+    out = await ctrl.do_command({"command": "stop"})
+    assert out == {"stopped": True, "interrupted": "home"}
+    assert ctrl.arm.stops == 1
+    assert await running == {"stopped": True, "command": "home"}
+    assert len(motion.moves) == 1  # nothing moved after the stop
+    assert ctrl._task is None
+
+
+@pytest.mark.asyncio
+async def test_stop_with_nothing_running_still_halts_the_arm():
+    ctrl = _make_control()
+    ctrl.arm = _FakeArm()
+    out = await ctrl.do_command({"command": "stop"})
+    assert out == {"stopped": True, "interrupted": None}
+    assert ctrl.arm.stops == 1

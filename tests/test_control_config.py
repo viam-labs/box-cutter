@@ -44,7 +44,7 @@ def test_settings_from_config_defaults():
     assert s.camera_frame == "cam"
     assert s.world_frame == "world"
     assert s.tool_frame == "tool"
-    assert s.blade_frame == ""
+    assert s.blade_frame == "blade-tool-90deg"
     assert s.min_box_area == 5000
     assert s.center_standoff_mm == 20
     assert s.hsv_lower == (10, 60, 80)
@@ -52,28 +52,28 @@ def test_settings_from_config_defaults():
 
 def test_settings_defaults_carry_the_measured_ground_truth():
     s = Settings.from_config(_config({"camera": "c", "arm": "a", "tool_frame": "t"}))
-    assert s.stopper_y_mm == -450.0
+    assert s.stopper_x_mm == 370.0
     assert s.knife_tip_to_table_mm == 490.0
     assert s.base_plate_height_mm == 20.0
-    assert s.home_xyz == (-4.0, -551.0, 470.0)
+    assert s.home_xyz == (399.97, 0.0, 406.48)
 
 
 def test_settings_defaults_carry_the_servo_tuning():
     s = Settings.from_config(_config({"camera": "c", "arm": "a", "tool_frame": "t"}))
-    assert s.blade_x_px == 339.0
+    assert s.blade_x_px == 344.0
     assert s.converge_tolerance_px == 2.25
-    assert s.servo_jacobian == (-1.0, 0.1, 0.2, -1.0)
+    assert s.servo_jacobian == (0.0, 3.2, -3.2, 0.0)
     assert (s.top_seam_gain, s.far_seam_gain, s.close_seam_gain) == (0.2, 0.05, 0.09)
 
 
 def test_settings_overrides_ground_truth_and_home():
     cfg = _config({
         "camera": "c", "arm": "a", "tool_frame": "t",
-        "stopper_y_mm": -500, "knife_tip_to_table_mm": 505,
+        "stopper_x_mm": 400, "knife_tip_to_table_mm": 505,
         "base_plate_height_mm": 25, "home_xyz": [0, -600, 500],
     })
     s = Settings.from_config(cfg)
-    assert s.stopper_y_mm == -500
+    assert s.stopper_x_mm == 400
     assert s.knife_tip_to_table_mm == 505
     assert s.base_plate_height_mm == 25
     assert s.home_xyz == (0.0, -600.0, 500.0)
@@ -82,9 +82,9 @@ def test_settings_overrides_ground_truth_and_home():
 def test_settings_ground_truth_stays_float_when_configured_whole():
     # `_num` coerces to the default's type, so an integer-looking override of a
     # float attribute must not silently become an int.
-    cfg = _config({"camera": "c", "arm": "a", "tool_frame": "t", "stopper_y_mm": -400})
+    cfg = _config({"camera": "c", "arm": "a", "tool_frame": "t", "stopper_x_mm": 400})
     s = Settings.from_config(cfg)
-    assert isinstance(s.stopper_y_mm, float)
+    assert isinstance(s.stopper_x_mm, float)
 
 
 def test_settings_rejects_wrong_length_home_xyz():
@@ -196,10 +196,10 @@ def test_reconfigure_clears_per_box_state():
     cfg = _config({"camera": "cam", "arm": "arm", "tool_frame": "tool"})
     ctrl.reconfigure(cfg, deps)
     ctrl._box_override = {"depth_mm": 1}
-    ctrl._box_frame = object()
+    ctrl._box_data = object()
     ctrl.reconfigure(cfg, deps)
     assert ctrl._box_override is None
-    assert ctrl._box_frame is None
+    assert ctrl._box_data is None
 
 
 def test_reconfigure_raises_on_missing_dependency():
@@ -212,3 +212,18 @@ def test_reconfigure_raises_on_missing_dependency():
         ctrl.reconfigure(
             _config({"camera": "cam", "arm": "arm", "tool_frame": "tool"}), deps
         )
+
+
+def test_reconfigure_keeps_the_open_robot_client():
+    ctrl = Control.__new__(Control)
+    deps = {
+        Camera.get_resource_name("cam"): object(),
+        Arm.get_resource_name("arm"): object(),
+        MotionClient.get_resource_name("builtin"): object(),
+    }
+    cfg = _config({"camera": "cam", "arm": "arm", "tool_frame": "tool"})
+    ctrl.reconfigure(cfg, deps)
+    client = object()
+    ctrl.robot_client = client
+    ctrl.reconfigure(cfg, deps)
+    assert ctrl.robot_client is client

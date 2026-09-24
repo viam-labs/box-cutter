@@ -106,6 +106,20 @@ The machine must be configured with:
 All actions are triggered through `DoCommand` with a `command` key. An unknown or
 missing `command` raises an error, as does an unknown `seam`.
 
+### `stop`
+
+Cancel the command currently driving the arm and halt the arm. The interrupted
+command returns `{"stopped": true, "command": "<name>"}`; `stop` itself returns
+`{"stopped": true, "interrupted": "<name>" | null}`. The arm is left where it
+stopped.
+
+Only one arm command runs at a time: sending another while one is in flight
+raises a `busy` error. `stop` and `get_properties` are always accepted.
+
+```json
+{ "command": "stop" }
+```
+
 ### `set_box`
 
 Override the detected box with measured values. Detection finds *where* the box
