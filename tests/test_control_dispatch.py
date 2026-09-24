@@ -926,3 +926,48 @@ async def test_dry_run_checks_frames_once_per_command():
         if dest == "world" and pif.pose.x == 0 and pif.pose.y == 0 and pif.pose.z == 0
     ]
     assert zero_pose_checks == ["tool", "blade", "cam", "world"]
+
+
+_WIDE = {"workspace_min_xyz": [-5000, -5000, -5000], "workspace_max_xyz": [5000, 5000, 5000]}
+
+
+@pytest.mark.asyncio
+async def test_dry_run_refuses_a_world_target_outside_the_workspace():
+    ctrl = _make_control(attrs={
+        "workspace_min_xyz": [0, 0, 0], "workspace_max_xyz": [100, 100, 100],
+    })
+    with pytest.raises(ValueError, match=r"leaves the workspace: x=400\.0"):
+        await ctrl.do_command({"command": "home", "dry_run": True})
+    assert ctrl.motion.moves == []
+
+
+@pytest.mark.asyncio
+async def test_dry_run_checks_relative_moves_in_world_coordinates():
+    # The fake adds TOOL_OFFSET (1, 2, 3) to a tool-frame pose sent to world,
+    # so a 10 mm jog along tool x lands at world x = 11. Without the transform
+    # the check would see x = 10.
+    ctrl = _make_control(attrs={
+        "workspace_min_xyz": [0, 0, 0], "workspace_max_xyz": [5, 100, 100],
+    })
+    with pytest.raises(ValueError, match=r"x=11\.0 not in \[0\.0, 5\.0\]"):
+        await ctrl.do_command({"command": "jog", "x": 10, "dry_run": True})
+    assert ctrl.motion.moves == []
+
+
+@pytest.mark.asyncio
+async def test_dry_run_full_cut_inside_the_workspace_reports_bounds_checked():
+    ctrl = _make_control(attrs=_WIDE)
+    await ctrl.do_command({"command": "set_box", "preset": "box_1"})
+    ctrl.camera = _ServoCamera([int(ctrl.settings.blade_x_px)])
+    out = await ctrl.do_command({"command": "full_cut", "dry_run": True})
+    assert out["completed"] is True
+    assert out["bounds_checked"] is True
+
+
+@pytest.mark.asyncio
+async def test_real_run_ignores_the_workspace():
+    ctrl = _make_control(attrs={
+        "workspace_min_xyz": [0, 0, 0], "workspace_max_xyz": [100, 100, 100],
+    })
+    await ctrl.do_command({"command": "home"})
+    assert len(ctrl.motion.moves) == 1

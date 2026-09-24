@@ -17,6 +17,7 @@ from typing import ClassVar, Mapping, Optional, Sequence, Tuple
 from typing_extensions import Self
 from viam.components.arm import Arm
 from viam.components.camera import Camera
+from viam.logging import getLogger
 from viam.proto.app.robot import ComponentConfig
 from viam.proto.common import Pose, PoseInFrame, ResourceName
 from viam.proto.service.motion import LinearConstraint
@@ -39,6 +40,10 @@ from models.detection import (
     pixel_error_to_delta_mm,
     sample_depth_in_mask,
 )
+
+# Module-level rather than `self.logger`: instances built without `new` (as the
+# tests do) have no resource logger.
+LOGGER = getLogger(__name__)
 
 SEAM_TOP = "top"
 SEAM_FAR = "far"
@@ -483,6 +488,11 @@ class Control(Generic, EasyResource):
         if not isinstance(raw_dry_run, bool):
             raise ValueError(f"'dry_run' must be true or false, got {raw_dry_run!r}")
         dry_run = raw_dry_run and name in DRY_RUN_COMMANDS
+        if dry_run and self.settings.workspace_min_xyz is None:
+            LOGGER.warning(
+                "dry run without workspace_min_xyz/workspace_max_xyz: "
+                "moves will not be bounds-checked"
+            )
         skipped: list = []
         self._dry_run, self._skipped, self._frames_checked = dry_run, skipped, False
         task = asyncio.create_task(self._dispatch(name, command), name=name)
@@ -1223,13 +1233,15 @@ class Control(Generic, EasyResource):
         A dry run records the label and skips the move: the blade never goes
         in, so there is nothing to pull back out of either. `_cut_side_seam`
         also reads the flag, to shorten the close-seam retract by the skipped
-        insert.
+        insert. Before sending, a dry run also checks the frames exist and, if
+        a workspace is configured, that the target stays inside it.
         """
         if self._dry_run:
             await self._check_frames()
             if plunge is not None:
                 self._skipped.append(plunge)
                 return
+            await self._check_bounds(component_name, destination)
         await self.motion.move(
             component_name=component_name,
             destination=destination,
@@ -1274,6 +1286,8 @@ class Control(Generic, EasyResource):
         """
         if self._frames_checked:
             return
+        if not self.robot_client:
+            self.robot_client = await create_robot_client_from_module()
         s = self.settings
         for frame in (s.tool_frame, s.blade_frame, s.camera_frame, s.world_frame):
             try:
@@ -1289,6 +1303,35 @@ class Control(Generic, EasyResource):
                     f"dry run: frame {frame!r} is not in the frame system ({e})"
                 ) from e
         self._frames_checked = True
+
+    async def _check_bounds(self, component_name: str, destination: PoseInFrame) -> None:
+        """Refuse a dry-run move whose target leaves the configured workspace.
+
+        A relative destination (tool or blade frame) is transformed to the world
+        frame first, which is exactly where the move will put that frame.
+        """
+        s = self.settings
+        if s.workspace_min_xyz is None:
+            return
+        if destination.reference_frame == s.world_frame:
+            pose = destination.pose
+        else:
+            pose = (await self._transform(destination, s.world_frame)).pose
+        outside = [
+            f"{axis}={value:.1f} not in [{lo:.1f}, {hi:.1f}]"
+            for axis, value, lo, hi in zip(
+                "xyz",
+                (pose.x, pose.y, pose.z),
+                s.workspace_min_xyz,
+                s.workspace_max_xyz,
+            )
+            if not lo <= value <= hi
+        ]
+        if outside:
+            raise ValueError(
+                f"dry run: {component_name} move leaves the workspace: "
+                + "; ".join(outside)
+            )
 
     async def get_status(
         self, *, timeout: Optional[float] = None, **kwargs
