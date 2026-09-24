@@ -330,6 +330,15 @@ class Settings:
                     "'workspace_min_xyz' exceeds 'workspace_max_xyz' on "
                     + ", ".join(inverted)
                 )
+
+        # Above this, the close-seam retract (a fixed pull-back distance) would
+        # move toward the box instead of away from it.
+        side_blade_insert_mm = _num(config, "side_blade_insert_mm", 0.0)  # was 16
+        if side_blade_insert_mm > CLOSE_SEAM_RETRACT_MM:
+            raise ValueError(
+                "'side_blade_insert_mm' must not exceed the close-seam retract "
+                f"({CLOSE_SEAM_RETRACT_MM} mm)"
+            )
         return cls(
             camera_name=camera_name,
             arm_name=arm_name,
@@ -365,7 +374,7 @@ class Settings:
             converge_max_blank_frames=_num(config, "converge_max_blank_frames", 5),
             seam_search_radius_px=_num(config, "seam_search_radius_px", 40.0),
             top_blade_insert_mm=_num(config, "top_blade_insert_mm", 25.0),
-            side_blade_insert_mm=_num(config, "side_blade_insert_mm", 0.0), # was 16
+            side_blade_insert_mm=side_blade_insert_mm,
             top_seam_chunks=_floats(config, "top_seam_chunks", (0.2, 0.2, 0.25)),
             side_seam_slice_mm=_num(config, "side_seam_slice_mm", 90.0),
             side_seam_z_offset_mm=_num(config, "side_seam_z_offset_mm", 15.0),
@@ -469,7 +478,10 @@ class Control(Generic, EasyResource):
             raise ValueError(
                 f"busy running {self._task.get_name()!r}; send 'stop' first"
             )
-        dry_run = bool(command.get("dry_run")) and name in DRY_RUN_COMMANDS
+        raw_dry_run = command.get("dry_run", False)
+        if not isinstance(raw_dry_run, bool):
+            raise ValueError(f"'dry_run' must be true or false, got {raw_dry_run!r}")
+        dry_run = raw_dry_run and name in DRY_RUN_COMMANDS
         skipped: list = []
         self._dry_run, self._skipped = dry_run, skipped
         task = asyncio.create_task(self._dispatch(name, command), name=name)
@@ -1084,8 +1096,8 @@ class Control(Generic, EasyResource):
             # back out of the tape.
             retract_z = -CLOSE_SEAM_RETRACT_MM
             if self._dry_run:
-                # The insert was skipped, so only pull back the clearance beyond
-                # it: the tool turns the same distance above its approach.
+                # The insert was skipped, so pull back only the clearance beyond
+                # it: the tool ends where a real run's retract ends.
                 retract_z += s.side_blade_insert_mm
             # Not a plunge: part of it clears the box, so a dry run keeps it.
             retract_plunge = None
@@ -1203,7 +1215,9 @@ class Control(Generic, EasyResource):
 
         `plunge` labels a blade insert or retract ("<seam>:<insert|retract>").
         A dry run records the label and skips the move: the blade never goes
-        in, so there is nothing to pull back out of either.
+        in, so there is nothing to pull back out of either. `_cut_side_seam`
+        also reads the flag, to shorten the close-seam retract by the skipped
+        insert.
         """
         if self._dry_run and plunge is not None:
             self._skipped.append(plunge)

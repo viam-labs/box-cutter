@@ -830,3 +830,31 @@ async def test_dry_run_is_ignored_on_commands_that_do_not_move():
     out = await ctrl.do_command({"command": "set_box", "preset": "box_1", "dry_run": True})
     assert "dry_run" not in out
     assert ctrl._dry_run is False
+
+
+@pytest.mark.asyncio
+async def test_dry_run_must_be_a_bool():
+    ctrl = _make_control()
+    with pytest.raises(ValueError, match="'dry_run' must be true or false"):
+        await ctrl.do_command({"command": "home", "dry_run": "false"})
+    assert ctrl.motion.moves == []
+
+
+@pytest.mark.asyncio
+async def test_stopped_dry_run_does_not_leak_into_the_next_real_run():
+    motion = _BlockingMotion()
+    ctrl = await _control_with_box_frame(motion=motion)
+    ctrl.arm = _FakeArm()
+    running = asyncio.create_task(
+        ctrl.do_command({"command": "cut", "seam": SEAM_TOP, "dry_run": True})
+    )
+    await motion.started.wait()
+    await ctrl.do_command({"command": "stop"})
+    assert (await running)["stopped"] is True
+    assert ctrl._dry_run is False
+
+    ctrl.motion = _RecordingMotion()
+    out = await ctrl.do_command({"command": "cut", "seam": SEAM_TOP})
+    assert "dry_run" not in out
+    # The real cut sends its inserts and retracts: 4 z moves plus 7 slices.
+    assert len(ctrl.motion.moves) == 11
