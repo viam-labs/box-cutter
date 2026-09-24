@@ -814,7 +814,7 @@ class Control(Generic, EasyResource):
             self._tool_pose(
                 x=box.tool_x_mm,
                 y=box.tool_y_mm,
-                z=box.knife_tip_to_top_mm - s.center_standoff_mm,
+                z=box.knife_tip_to_top_mm - s.center_standoff_mm - self._clearance(),
             ),
             constraints=Constraints(
                 linear_constraint=[
@@ -869,7 +869,7 @@ class Control(Generic, EasyResource):
             self._world_pose(
                 x=seam_x,
                 y=box.center_y_mm,
-                z=box.center_z_mm + s.side_seam_z_offset_mm,
+                z=box.center_z_mm + s.side_seam_z_offset_mm + self._clearance(),
                 theta=SIDE_SEAM_THETA_DEG,
             ),
         )
@@ -1190,6 +1190,10 @@ class Control(Generic, EasyResource):
         }
 
     # --- pose helpers ---------------------------------------------------------
+
+    def _clearance(self) -> float:
+        """Extra standoff a dry run adds to every approach, to hold the blade clear."""
+        return self.settings.dry_run_clearance_mm if self._dry_run else 0.0
 
     def _world_pose(self, x, y, z, theta: float = 0.0) -> PoseInFrame:
         return PoseInFrame(

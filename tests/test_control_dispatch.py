@@ -858,3 +858,29 @@ async def test_stopped_dry_run_does_not_leak_into_the_next_real_run():
     assert "dry_run" not in out
     # The real cut sends its inserts and retracts: 4 z moves plus 7 slices.
     assert len(ctrl.motion.moves) == 11
+
+
+@pytest.mark.asyncio
+async def test_dry_run_move_to_center_stops_higher():
+    ctrl = _make_control()
+    await ctrl.do_command({"command": "set_box", "preset": "box_1"})
+    out = await ctrl.do_command({"command": "move_to_center", "dry_run": True})
+    s = ctrl.settings
+    _, dest, _ = ctrl.motion.moves[-1]
+    assert dest.pose.z == pytest.approx(
+        out["box_frame"]["knife_tip_to_top_mm"]
+        - s.center_standoff_mm
+        - s.dry_run_clearance_mm
+    )
+
+
+@pytest.mark.asyncio
+async def test_dry_run_side_seam_approach_stops_higher():
+    ctrl = await _control_with_box_frame()
+    ctrl.motion.moves.clear()
+    await ctrl.do_command({"command": "move_to_seam", "seam": SEAM_FAR, "dry_run": True})
+    s, box = ctrl.settings, ctrl._box_data
+    stage = ctrl.motion.moves[0]
+    assert stage[1].pose.z == pytest.approx(
+        box.center_z_mm + s.side_seam_z_offset_mm + s.dry_run_clearance_mm
+    )
