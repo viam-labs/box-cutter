@@ -66,18 +66,27 @@ class _FakeCamera:
 class _FakeRobotClient:
     """Stands in for RobotClient.transform_pose.
 
-    `world` passes the camera-frame point through unchanged; the tool frame is
-    offset so tests can tell the two apart.
+    Camera-frame points pass through unchanged to `world`. A camera point sent
+    to the tool frame, or a tool-frame pose sent to `world`, is offset by
+    TOOL_OFFSET so tests can tell them apart. `fail_frames` makes a source
+    frame raise, as a frame missing from the frame system would.
     """
     TOOL_OFFSET = (1.0, 2.0, 3.0)
 
-    def __init__(self):
+    def __init__(self, fail_frames=()):
         self.requests = []
+        self.fail_frames = set(fail_frames)
 
     async def transform_pose(self, pose_in_frame, dest_frame):
         self.requests.append((pose_in_frame, dest_frame))
+        source = pose_in_frame.reference_frame
+        if source in self.fail_frames:
+            raise RuntimeError(f"frame {source} not found")
         p = pose_in_frame.pose
-        if dest_frame == "world":
+        # Camera points pass straight through to world. A camera point sent
+        # to the tool frame, or a tool-frame pose sent to world, is offset so
+        # tests can tell them apart.
+        if dest_frame == "world" and source != "tool":
             x, y, z = p.x, p.y, p.z
         else:
             dx, dy, dz = self.TOOL_OFFSET
@@ -866,6 +875,7 @@ async def test_dry_run_move_to_center_stops_higher():
     await ctrl.do_command({"command": "set_box", "preset": "box_1"})
     out = await ctrl.do_command({"command": "move_to_center", "dry_run": True})
     s = ctrl.settings
+    assert s.dry_run_clearance_mm > 0
     _, dest, _ = ctrl.motion.moves[-1]
     assert dest.pose.z == pytest.approx(
         out["box_frame"]["knife_tip_to_top_mm"]
@@ -880,7 +890,39 @@ async def test_dry_run_side_seam_approach_stops_higher():
     ctrl.motion.moves.clear()
     await ctrl.do_command({"command": "move_to_seam", "seam": SEAM_FAR, "dry_run": True})
     s, box = ctrl.settings, ctrl._box_data
+    assert s.dry_run_clearance_mm > 0
     stage = ctrl.motion.moves[0]
     assert stage[1].pose.z == pytest.approx(
         box.center_z_mm + s.side_seam_z_offset_mm + s.dry_run_clearance_mm
     )
+
+
+@pytest.mark.asyncio
+async def test_dry_run_refuses_a_missing_frame_before_moving():
+    ctrl = _make_control()
+    ctrl.robot_client = _FakeRobotClient(fail_frames={"blade"})
+    with pytest.raises(ValueError, match="frame 'blade'"):
+        await ctrl.do_command({"command": "home", "dry_run": True})
+    assert ctrl.motion.moves == []
+
+
+@pytest.mark.asyncio
+async def test_real_run_skips_the_frame_check():
+    ctrl = _make_control()
+    ctrl.robot_client = _FakeRobotClient(fail_frames={"blade"})
+    await ctrl.do_command({"command": "home"})
+    assert len(ctrl.motion.moves) == 1
+    assert ctrl.robot_client.requests == []
+
+
+@pytest.mark.asyncio
+async def test_dry_run_checks_frames_once_per_command():
+    ctrl = _make_control()
+    await ctrl.do_command({"command": "set_box", "preset": "box_1"})
+    ctrl.camera = _ServoCamera([int(ctrl.settings.blade_x_px)])
+    await ctrl.do_command({"command": "full_cut", "dry_run": True})
+    zero_pose_checks = [
+        pif.reference_frame for pif, dest in ctrl.robot_client.requests
+        if dest == "world" and pif.pose.x == 0 and pif.pose.y == 0 and pif.pose.z == 0
+    ]
+    assert zero_pose_checks == ["tool", "blade", "cam", "world"]

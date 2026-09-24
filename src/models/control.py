@@ -401,6 +401,7 @@ class Control(Generic, EasyResource):
     # (the busy guard means there is only ever one). See `_move`.
     _dry_run: bool = False
     _skipped: Optional[list] = None
+    _frames_checked: bool = False
 
     @classmethod
     def new(
@@ -483,7 +484,7 @@ class Control(Generic, EasyResource):
             raise ValueError(f"'dry_run' must be true or false, got {raw_dry_run!r}")
         dry_run = raw_dry_run and name in DRY_RUN_COMMANDS
         skipped: list = []
-        self._dry_run, self._skipped = dry_run, skipped
+        self._dry_run, self._skipped, self._frames_checked = dry_run, skipped, False
         task = asyncio.create_task(self._dispatch(name, command), name=name)
         self._task = task
         try:
@@ -1097,7 +1098,8 @@ class Control(Generic, EasyResource):
             retract_z = -CLOSE_SEAM_RETRACT_MM
             if self._dry_run:
                 # The insert was skipped, so pull back only the clearance beyond
-                # it: the tool ends where a real run's retract ends.
+                # it: the tool rises as far above its approach as a real run's
+                # retract does.
                 retract_z += s.side_blade_insert_mm
             # Not a plunge: part of it clears the box, so a dry run keeps it.
             retract_plunge = None
@@ -1223,9 +1225,11 @@ class Control(Generic, EasyResource):
         also reads the flag, to shorten the close-seam retract by the skipped
         insert.
         """
-        if self._dry_run and plunge is not None:
-            self._skipped.append(plunge)
-            return
+        if self._dry_run:
+            await self._check_frames()
+            if plunge is not None:
+                self._skipped.append(plunge)
+                return
         await self.motion.move(
             component_name=component_name,
             destination=destination,
@@ -1247,17 +1251,44 @@ class Control(Generic, EasyResource):
         pif = await self._to_frame((ex, ey, ez), self.settings.world_frame)
         return (pif.pose.x, pif.pose.y, pif.pose.z)
 
-    async def _to_frame(self, point_xyz, dest_frame):
-        """Transform a camera-frame point (mm) into dest_frame."""
+    async def _transform(self, pose_in_frame: PoseInFrame, dest_frame: str):
+        """`transform_pose` through the lazily opened robot client."""
         if not self.robot_client:
             self.robot_client = await create_robot_client_from_module()
+        return await self.robot_client.transform_pose(pose_in_frame, dest_frame)
 
+    async def _to_frame(self, point_xyz, dest_frame):
+        """Transform a camera-frame point (mm) into dest_frame."""
         x, y, z = point_xyz
         observer_pose = PoseInFrame(
             reference_frame=self.settings.camera_frame,
             pose=Pose(x=x, y=y, z=z, o_x=0, o_y=0, o_z=1, theta=0),
         )
-        return await self.robot_client.transform_pose(observer_pose, dest_frame)
+        return await self._transform(observer_pose, dest_frame)
+
+    async def _check_frames(self) -> None:
+        """Fail a dry run on a frame the frame system does not know, before it moves.
+
+        Transforming a zero pose works however the frame is defined (a
+        component's frame or an extra transform), which a config lookup would not.
+        """
+        if self._frames_checked:
+            return
+        s = self.settings
+        for frame in (s.tool_frame, s.blade_frame, s.camera_frame, s.world_frame):
+            try:
+                await self._transform(
+                    PoseInFrame(
+                        reference_frame=frame,
+                        pose=Pose(x=0, y=0, z=0, o_x=0, o_y=0, o_z=1, theta=0),
+                    ),
+                    s.world_frame,
+                )
+            except Exception as e:
+                raise ValueError(
+                    f"dry run: frame {frame!r} is not in the frame system ({e})"
+                ) from e
+        self._frames_checked = True
 
     async def get_status(
         self, *, timeout: Optional[float] = None, **kwargs
