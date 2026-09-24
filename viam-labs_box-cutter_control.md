@@ -91,7 +91,7 @@ The machine must be configured with:
 |---|---|---|---|---|
 | `center_standoff_mm` | float | Optional | `20` | How far above the box top the tool stops on `move_to_center`. |
 | `top_blade_insert_mm` | float | Optional | `25` | Blade insertion depth for the top seam. |
-| `side_blade_insert_mm` | float | Optional | `16` | Blade insertion depth for the side seams. |
+| `side_blade_insert_mm` | float | Optional | `0` | Blade insertion depth for the side seams. Must not exceed 40 (the close-seam retract). |
 | `top_seam_chunks` | [float] | Optional | `[0.2, 0.2, 0.25]` | Top-seam pass split into these fractions of box height; their sum is the travel per direction. |
 | `side_seam_slice_mm` | float | Optional | `90` | Slice distance along each side seam. |
 | `blade_angle_deg` | float | Optional | `30` | Blade tilt applied before a side cut, and undone after. |
@@ -100,6 +100,16 @@ The machine must be configured with:
 | `descent_tolerance_mm` | float | Optional | `10` | Linear tolerance for the descent to box center. |
 | `cut_tolerance_mm` | float | Optional | `3` | Linear tolerance for a side-seam slice. |
 | `seam_match_tolerance_mm` | float | Optional | `40` | How close the tool must be to a seam for `cut` to infer it. |
+
+#### Dry run
+
+Only read when a command passes `"dry_run": true`.
+
+| Name | Type | Inclusion | Default | Description |
+|---|---|---|---|---|
+| `dry_run_clearance_mm` | float | Optional | `30` | Extra height added to every approach standoff during a dry run. Must not be negative. |
+| `workspace_min_xyz` | [float × 3] | Optional | — | Lower corner of the allowed volume for the knife tip, world frame. Set together with `workspace_max_xyz`. |
+| `workspace_max_xyz` | [float × 3] | Optional | — | Upper corner. Must not be below `workspace_min_xyz` on any axis. |
 
 ## DoCommand
 
@@ -119,6 +129,78 @@ raises a `busy` error. `stop` and `get_properties` are always accepted.
 ```json
 { "command": "stop" }
 ```
+
+### Dry run
+
+`home`, `jog`, `move_to_center`, `move_to_seam`, `converge`, `cut`, and
+`full_cut` accept a `"dry_run": true` key. It must be a JSON boolean; any other
+value raises an error. Other commands ignore it.
+
+The arm runs the real sequence, but:
+
+- blade inserts and retracts are skipped and recorded in `skipped`, in order,
+  as `"<seam>:<insert|retract>"`;
+- the close seam's retract, which is a real move (it pulls clear of the box,
+  not just out of the tape), is shortened by the skipped insert depth;
+- every approach standoff is raised by `dry_run_clearance_mm`;
+- before the first move, `tool_frame`, `blade_frame`, `camera_frame`, and
+  `world_frame` must all exist in the frame system;
+- if `workspace_min_xyz`/`workspace_max_xyz` are configured, any move whose
+  target would leave that volume is refused before it is sent.
+
+A real run (no `dry_run`, or `dry_run: false`) makes none of these checks and
+issues no extra calls.
+
+```json
+{ "command": "full_cut", "dry_run": true }
+```
+
+The response is the normal result plus:
+
+```json
+{
+  "dry_run": true,
+  "skipped": ["top:insert", "top:retract", "far:insert", "far:retract", "close:insert"],
+  "bounds_checked": true
+}
+```
+
+A dry run interrupted by `stop` returns the same plain response as any other
+interrupted command: `{"stopped": true, "command": "<name>"}` — no `dry_run`
+fields are added.
+
+**What the bounds check covers**
+
+- Bounds are in the world frame and cover the tool origin (the knife tip)
+  only — not the arm links, the camera, or the blade body. Blade rotations
+  aren't checked.
+- The check runs on the dry-run path, which is raised by
+  `dry_run_clearance_mm` and skips the inserts. It does not prove a real run's
+  lower points are in bounds: a real run's knife tip goes
+  `dry_run_clearance_mm` plus the blade insert depth (`top_blade_insert_mm` on
+  the top seam, `side_blade_insert_mm` on a side seam) below the lowest point
+  the dry run checked. Set `workspace_min_xyz`'s z at least that far below the
+  dry run's lowest point, or the real cut falls outside the box the dry run
+  approved.
+- Without `workspace_min_xyz`/`workspace_max_xyz` configured, the dry run
+  still runs, logs a warning, and returns `"bounds_checked": false`.
+- Each tool-relative move costs one extra `transform_pose` call during a dry
+  run.
+
+**`converge` in a dry run** servos from the raised height. The servo Jacobian
+and pixel settings were tuned at the real standoff, so `iterations` and
+`error_px` won't match a real run exactly — use it to confirm direction, not
+tuning.
+
+**Commissioning a new box or cell:** run `full_cut` with `dry_run` first and
+confirm every move goes the way you expect, then run it for real.
+
+**Caveat:** a dry-run `cut` only stays clear of the box if the move that
+positioned the arm was also a dry run (`full_cut`, or `move_to_center` /
+`move_to_seam` with `dry_run`). After a real `move_to_center`, a dry-run top
+cut slices at the real `center_standoff_mm` standoff, where a raised flap can
+still be hit. After a real `move_to_seam`, while `side_blade_insert_mm` is
+`0`, a dry-run side cut takes the same path as a real one.
 
 ### `set_box`
 
