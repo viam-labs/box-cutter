@@ -46,20 +46,12 @@ SEAM_CLOSE = "close"
 SEAMS = (SEAM_TOP, SEAM_FAR, SEAM_CLOSE)
 
 # Hand-tuned asymmetries from expirmental data that adjust the motion calls of the arm.
-CLOSE_SEAM_RETRACT_MM = 40.0      # close seam retracts much further than it inserted
+# close seam retracts much further than it inserted, an in-between step to return home
+CLOSE_SEAM_RETRACT_MM = 40.0
 FAR_SEAM_APPROACH_LATERAL_MM = 5.0  # lateral nudge only the far approach uses
-# Which way along tool x the blade travels when slicing. The tool frame's x runs
-# along the seam at every seam (the tool yaws with the seam), but whether +x
-# points up or down the seam was not derivable from the frame measurements --
-# flip this if a retracted dry run shows the side-seam stroke leaving the box.
-# The top seam is unaffected: it cuts symmetrically either side of center.
-CUT_SIGN = 1.0
+# Which way along tool x the blade travels when slicing.
+CUT_SIGN = -1.0
 CLOSE_SEAM_FINAL_THETA_DEG = 90.0  # unwinds the tool after the last cut
-# TODO: still the old arm's value. This is a world-frame yaw (passed to
-# `_world_pose`), so the +90 deg base rotation shifts it to either 0 or -180.
-# Theta is measured about o_z=-1, which makes the sign easy to get backwards --
-# jog the tool into the side-seam orientation and read it back from
-# `motion.get_pose(tool_frame, world)` rather than deriving it.
 SIDE_SEAM_THETA_DEG = -90.0       # tool yaw for both side-seam approaches
 
 # Two seam candidates closer together than this cannot be told apart from the
@@ -71,11 +63,15 @@ SEAM_AMBIGUITY_MM = 5.0
 JOG_MAX_MM = 50.0
 
 
-# TODO: remeasure the cut calculations (height_mm for the box)
-# The five boxes measured on the original cell, as
+
 # (depth_mm, u, v, flap_width_mm, box_height_mm) -- see `set_box`.
+#  depth_mm - the distance from the camera to the top of the box
+# u - the x pixel of the center of the box, seen in the camera in CONTROL tab
+# v - the y pixel of the center of the box, seen in the camera in CONTROL tab
+# flap_width_mm - the width of the box's flap, in mm
+# box_height_mm - the "height" of the box, which in our case is the length of the top seam
 BOX_PRESETS = {
-    "box_1": (535.0, 360, 223, 120.0, 280.0),
+    "box_1": (525.0, 358, 225, 120.0, 280.0),
     "box_2": (456.0, 401, 254, 106.0, -1),
     "box_3": (479.0, 422, 262, 80.0, -1),
     "box_4": (477.0, 425, 285, 82.0, -1),
@@ -236,7 +232,7 @@ class Settings:
 
     # Measured ground truth for this cell.
     stopper_x_mm: float
-    knife_tip_to_table_mm: float
+    knife_tip_to_table_mm:float
     base_plate_height_mm: float
     home_xyz: Tuple[float, ...]
     center_standoff_mm: float
@@ -308,8 +304,8 @@ class Settings:
             inset_mm=_num(config, "inset_mm", 8.0),
             min_seam_len_px=_num(config, "min_seam_len_px", 60),
             seam_dark_v_max=_num(config, "seam_dark_v_max", 80),
-            stopper_x_mm=_num(config, "stopper_x_mm", 370.0),
-            knife_tip_to_table_mm=_num(config, "knife_tip_to_table_mm", 490.0),
+            stopper_x_mm=_num(config, "stopper_x_mm", 332.0),
+            knife_tip_to_table_mm=_num(config, "knife_tip_to_table_mm", 435.0),
             base_plate_height_mm=_num(config, "base_plate_height_mm", 20.0),
             home_xyz=_floats(config, "home_xyz", (399.97, -0, 406.48), length=3),
             center_standoff_mm=_num(config, "center_standoff_mm", 20.0),
@@ -329,12 +325,12 @@ class Settings:
             converge_max_blank_frames=_num(config, "converge_max_blank_frames", 5),
             seam_search_radius_px=_num(config, "seam_search_radius_px", 40.0),
             top_blade_insert_mm=_num(config, "top_blade_insert_mm", 25.0),
-            side_blade_insert_mm=_num(config, "side_blade_insert_mm", 0.0), # was 16
-            top_seam_chunks=_floats(config, "top_seam_chunks", (0.2, 0.2, 0.25)),
-            side_seam_slice_mm=_num(config, "side_seam_slice_mm", 90.0),
-            side_seam_z_offset_mm=_num(config, "side_seam_z_offset_mm", 15.0),
-            blade_angle_deg=_num(config, "blade_angle_deg", 30.0),
-            seam_offset_fraction=_num(config, "seam_offset_fraction", 0.45),
+            side_blade_insert_mm=_num(config, "side_blade_insert_mm", 16.0),
+            top_seam_chunks=_floats(config, "top_seam_chunks", (0.15, 0.15, 0.25)),
+            side_seam_slice_mm=_num(config, "side_seam_slice_mm", 65.0),
+            side_seam_z_offset_mm=_num(config, "side_seam_z_offset_mm", 10.0),
+            blade_angle_deg=_num(config, "blade_angle_deg", 15.0),
+            seam_offset_fraction=_num(config, "seam_offset_fraction", 0.55),
             seam_match_tolerance_mm=_num(config, "seam_match_tolerance_mm", 40.0),
             descent_tolerance_mm=_num(config, "descent_tolerance_mm", 10.0),
             cut_tolerance_mm=_num(config, "cut_tolerance_mm", 3.0),
@@ -541,16 +537,13 @@ class Control(Generic, EasyResource):
 
     # --- detection ------------------------------------------------------------
 
-    # NOTE: potentially move overrides higher in this function
     async def find_center(self) -> Mapping[str, ValueTypes]:
         """Detect the box, apply any override, and derive the box frame."""
         s = self.settings
         # images, _ = await self.camera.get_images()
         properties = await self.camera.get_properties()
         intr = properties.intrinsic_parameters
-        # A camera with no calibration reports zero focal lengths, which would
-        # surface as a ZeroDivisionError from inside deproject rather than
-        # something a caller can act on.
+
         if not intr.focal_x_px or not intr.focal_y_px:
             raise ValueError(
                 "camera returned no intrinsic parameters; cannot deproject "
@@ -633,20 +626,6 @@ class Control(Generic, EasyResource):
             "box_frame": box.to_dict(),
         }
 
-        # if seam is not None:
-        #     top_px, bottom_px, angle_deg = seam
-        #     top_w = await self._endpoint_world(top_px, z, intr)
-        #     bottom_w = await self._endpoint_world(bottom_px, z, intr)
-        #     top_inset, bottom_inset = inset_endpoints(top_w, bottom_w, s.inset_mm)
-        #     result["seam"] = {
-        #         "top_px": [int(top_px[0]), int(top_px[1])],
-        #         "bottom_px": [int(bottom_px[0]), int(bottom_px[1])],
-        #         "angle_deg": float(angle_deg),
-        #     }
-        #     result["cut_endpoints_world"] = {
-        #         "top": [float(c) for c in top_inset],
-        #         "bottom": [float(c) for c in bottom_inset],
-        #     }
         return result
 
     # --- staging motions ------------------------------------------------------
@@ -720,10 +699,12 @@ class Control(Generic, EasyResource):
         # Disabled until the tool-change deck is re-measured on the new arm: the
         # pose below is in the old arm's frame, so driving to it would be a guess.
         # s = self.settings
+        # NOTE: to do the tool_change, measure the coordinate above the tool change deck and put here
         # pose_above_deck = self._world_pose(251.86, -405.89, 115.23)
+        # NOTE: to do the tool_change, measure how deep does the arm need to descend straight down to hook up the new tool
         # tool_change_descent = 121.5
         # await self.motion.move(component_name=s.tool_frame, destination=pose_above_deck)
-        # # z goes to -6.75
+        #
         # tool_change_constraint=Constraints(
         #                linear_constraint=[
         #                    LinearConstraint(line_tolerance_mm=s.descent_tolerance_mm)
@@ -798,7 +779,7 @@ class Control(Generic, EasyResource):
         else:
             seam_x = s.stopper_x_mm
             blade_theta = s.blade_angle_deg
-            approach_lateral = 0.0
+            approach_lateral = -FAR_SEAM_APPROACH_LATERAL_MM
 
         await self.motion.move(
             component_name=s.tool_frame,
@@ -1007,7 +988,6 @@ class Control(Generic, EasyResource):
         chunks = [f * box.height_mm for f in s.top_seam_chunks]
         cut_distance = sum(chunks)
 
-        # TODO: double check this extra business
         await self._tool_move(z=s.top_blade_insert_mm)
         steps.append("insert")
         for chunk in chunks:
@@ -1036,7 +1016,10 @@ class Control(Generic, EasyResource):
             retract_z = -s.side_blade_insert_mm
             straighten_theta = s.blade_angle_deg
         else:
-            insert_z = s.side_blade_insert_mm
+            # NOTE: this is a hack, no time to debug
+            # for closer seam, for some reason, the blade is further away, so we need
+            # to insert it more
+            insert_z = s.side_blade_insert_mm + 7
             # The close seam pulls far clear of the box on the way out, not just
             # back out of the tape.
             retract_z = -CLOSE_SEAM_RETRACT_MM
