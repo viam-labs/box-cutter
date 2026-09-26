@@ -17,6 +17,7 @@ from typing import ClassVar, Mapping, Optional, Sequence, Tuple
 from typing_extensions import Self
 from viam.components.arm import Arm
 from viam.components.camera import Camera
+from viam.logging import getLogger
 from viam.proto.app.robot import ComponentConfig
 from viam.proto.common import Pose, PoseInFrame, ResourceName
 from viam.proto.service.motion import LinearConstraint
@@ -40,6 +41,10 @@ from models.detection import (
     sample_depth_in_mask,
 )
 
+# Module-level rather than `self.logger`: instances built without `new` (as the
+# tests do) have no resource logger.
+LOGGER = getLogger(__name__)
+
 SEAM_TOP = "top"
 SEAM_FAR = "far"
 SEAM_CLOSE = "close"
@@ -48,7 +53,13 @@ SEAMS = (SEAM_TOP, SEAM_FAR, SEAM_CLOSE)
 # Hand-tuned asymmetries from expirmental data that adjust the motion calls of the arm.
 # close seam retracts much further than it inserted, an in-between step to return home
 CLOSE_SEAM_RETRACT_MM = 40.0
-FAR_SEAM_APPROACH_LATERAL_MM = 5.0  # lateral nudge only the far approach uses
+# The close seam inserts this much deeper than `side_blade_insert_mm`: on the
+# cell the blade sits further from the tape there. A measured workaround, not an
+# explained one -- the cause (likely the close-seam staging or stopper_x_mm) is
+# still to be found.
+CLOSE_SEAM_EXTRA_INSERT_MM = 7.0
+# Lateral nudge on the side-seam approaches: + for the far seam, - for the close.
+FAR_SEAM_APPROACH_LATERAL_MM = 5.0
 # Which way along tool x the blade travels when slicing.
 CUT_SIGN = -1.0
 CLOSE_SEAM_FINAL_THETA_DEG = 90.0  # unwinds the tool after the last cut
@@ -61,6 +72,11 @@ SEAM_AMBIGUITY_MM = 5.0
 # `jog` is driven by hand with a blade mounted, so a fat-fingered 50 where 5 was
 # meant should be refused rather than executed.
 JOG_MAX_MM = 50.0
+
+# Commands that move the arm and so accept `dry_run`. It is ignored elsewhere.
+DRY_RUN_COMMANDS = frozenset(
+    {"home", "jog", "move_to_center", "move_to_seam", "converge", "cut", "full_cut"}
+)
 
 
 
@@ -120,9 +136,9 @@ def _triple(
 def _floats(
     config: ComponentConfig,
     key: str,
-    default: Tuple[float, ...],
+    default: Optional[Tuple[float, ...]],
     length: Optional[int] = None,
-) -> Tuple[float, ...]:
+) -> Optional[Tuple[float, ...]]:
     """A configured list of floats, optionally of a fixed length."""
     fields = config.attributes.fields
     if key not in fields or not fields[key].HasField("list_value"):
@@ -262,6 +278,11 @@ class Settings:
     descent_tolerance_mm: float
     cut_tolerance_mm: float
 
+    # Dry run: only read when a command passes `dry_run`.
+    dry_run_clearance_mm: float
+    workspace_min_xyz: Optional[Tuple[float, ...]]
+    workspace_max_xyz: Optional[Tuple[float, ...]]
+
     @property
     def top_seam_span_fraction(self) -> float:
         """Fraction of the box height one top-seam pass covers."""
@@ -290,6 +311,43 @@ class Settings:
             raise ValueError("'arm' is required")
         if not tool_frame:
             raise ValueError("'tool_frame' is required")
+
+        # A negative clearance would make a dry run pass closer to the box than
+        # a real run.
+        dry_run_clearance_mm = _num(config, "dry_run_clearance_mm", 30.0)
+        if dry_run_clearance_mm < 0:
+            raise ValueError("'dry_run_clearance_mm' must not be negative")
+
+        # The bounds are optional, but a half-set or inverted box is a config
+        # mistake that would otherwise surface as every dry-run move failing.
+        workspace_min_xyz = _floats(config, "workspace_min_xyz", None, length=3)
+        workspace_max_xyz = _floats(config, "workspace_max_xyz", None, length=3)
+        if (workspace_min_xyz is None) != (workspace_max_xyz is None):
+            raise ValueError(
+                "'workspace_min_xyz' and 'workspace_max_xyz' must be set together"
+            )
+        if workspace_min_xyz is not None:
+            inverted = [
+                axis
+                for axis, lo, hi in zip("xyz", workspace_min_xyz, workspace_max_xyz)
+                if lo > hi
+            ]
+            if inverted:
+                raise ValueError(
+                    "'workspace_min_xyz' exceeds 'workspace_max_xyz' on "
+                    + ", ".join(inverted)
+                )
+
+        # Above this, the close-seam insert would be deeper than its fixed
+        # retract, so the tool would turn with the blade still in the tape.
+        side_blade_insert_mm = _num(config, "side_blade_insert_mm", 16.0)
+        max_side_insert = CLOSE_SEAM_RETRACT_MM - CLOSE_SEAM_EXTRA_INSERT_MM
+        if side_blade_insert_mm > max_side_insert:
+            raise ValueError(
+                f"'side_blade_insert_mm' must not exceed {max_side_insert} mm: the "
+                f"close seam inserts {CLOSE_SEAM_EXTRA_INSERT_MM} mm deeper and "
+                f"retracts {CLOSE_SEAM_RETRACT_MM} mm"
+            )
         return cls(
             camera_name=camera_name,
             arm_name=arm_name,
@@ -325,7 +383,7 @@ class Settings:
             converge_max_blank_frames=_num(config, "converge_max_blank_frames", 5),
             seam_search_radius_px=_num(config, "seam_search_radius_px", 40.0),
             top_blade_insert_mm=_num(config, "top_blade_insert_mm", 25.0),
-            side_blade_insert_mm=_num(config, "side_blade_insert_mm", 16.0),
+            side_blade_insert_mm=side_blade_insert_mm,
             top_seam_chunks=_floats(config, "top_seam_chunks", (0.15, 0.15, 0.25)),
             side_seam_slice_mm=_num(config, "side_seam_slice_mm", 65.0),
             side_seam_z_offset_mm=_num(config, "side_seam_z_offset_mm", 10.0),
@@ -334,6 +392,9 @@ class Settings:
             seam_match_tolerance_mm=_num(config, "seam_match_tolerance_mm", 40.0),
             descent_tolerance_mm=_num(config, "descent_tolerance_mm", 10.0),
             cut_tolerance_mm=_num(config, "cut_tolerance_mm", 3.0),
+            dry_run_clearance_mm=dry_run_clearance_mm,
+            workspace_min_xyz=workspace_min_xyz,
+            workspace_max_xyz=workspace_max_xyz,
         )
 
 
@@ -345,6 +406,11 @@ class Control(Generic, EasyResource):
     robot_client: Optional[RobotClient] = None
     # The command currently driving the arm, so `stop` can cancel it.
     _task: Optional[asyncio.Task] = None
+    # Per-command dry-run state, set by `do_command` for the one running command
+    # (the busy guard means there is only ever one). See `_move`.
+    _dry_run: bool = False
+    _skipped: Optional[list] = None
+    _frames_checked: bool = False
 
     @classmethod
     def new(
@@ -422,6 +488,17 @@ class Control(Generic, EasyResource):
             raise ValueError(
                 f"busy running {self._task.get_name()!r}; send 'stop' first"
             )
+        raw_dry_run = command.get("dry_run", False)
+        if not isinstance(raw_dry_run, bool):
+            raise ValueError(f"'dry_run' must be true or false, got {raw_dry_run!r}")
+        dry_run = raw_dry_run and name in DRY_RUN_COMMANDS
+        if dry_run and self.settings.workspace_min_xyz is None:
+            LOGGER.warning(
+                "dry run without workspace_min_xyz/workspace_max_xyz: "
+                "moves will not be bounds-checked"
+            )
+        skipped: list = []
+        self._dry_run, self._skipped, self._frames_checked = dry_run, skipped, False
         task = asyncio.create_task(self._dispatch(name, command), name=name)
         self._task = task
         try:
@@ -436,9 +513,18 @@ class Control(Generic, EasyResource):
         finally:
             if self._task is task:
                 self._task = None
+            self._dry_run = False
         if task.cancelled():
             return {"stopped": True, "command": name}
-        return task.result()
+        result = task.result()
+        if dry_run:
+            result = {
+                **result,
+                "dry_run": True,
+                "skipped": skipped,
+                "bounds_checked": self.settings.workspace_min_xyz is not None,
+            }
+        return result
 
     async def _dispatch(
         self, name: str, command: Mapping[str, ValueTypes]
@@ -651,10 +737,7 @@ class Control(Generic, EasyResource):
     async def _move_home(self) -> None:
         s = self.settings
         x, y, z = s.home_xyz
-        await self.motion.move(
-            component_name=s.tool_frame,
-            destination=self._world_pose(x, y, z),
-        )
+        await self._move(s.tool_frame, self._world_pose(x, y, z))
 
     async def jog(self, command: Mapping[str, ValueTypes]) -> Mapping[str, ValueTypes]:
         """Step the tool in its own frame and report the world pose either side.
@@ -726,12 +809,12 @@ class Control(Generic, EasyResource):
             return result
         s = self.settings
         box = self._box_data
-        await self.motion.move(
-            component_name=s.tool_frame,
-            destination=self._tool_pose(
-                x=box.tool_x_mm, # 383
-                y=box.tool_y_mm, # -3
-                z=box.knife_tip_to_top_mm - s.center_standoff_mm, # 285 - 20 = 265
+        await self._move(
+            s.tool_frame,
+            self._tool_pose(
+                x=box.tool_x_mm,
+                y=box.tool_y_mm,
+                z=box.knife_tip_to_top_mm - s.center_standoff_mm - self._clearance(),
             ),
             constraints=Constraints(
                 linear_constraint=[
@@ -766,8 +849,8 @@ class Control(Generic, EasyResource):
 
         The far seam sits a box-height beyond the stopper; the close one sits at
         it. The blade tilts opposite ways for the two -- they are approached from
-        opposite sides of the box -- and only the far approach takes the lateral
-        nudge.
+        opposite sides of the box -- and take the lateral nudge in opposite
+        directions.
         """
         s = self.settings
         if seam == SEAM_FAR:
@@ -781,28 +864,21 @@ class Control(Generic, EasyResource):
             blade_theta = s.blade_angle_deg
             approach_lateral = -FAR_SEAM_APPROACH_LATERAL_MM
 
-        await self.motion.move(
-            component_name=s.tool_frame,
-            destination=self._world_pose(
+        await self._move(
+            s.tool_frame,
+            self._world_pose(
                 x=seam_x,
                 y=box.center_y_mm,
-                z=box.center_z_mm + s.side_seam_z_offset_mm,
+                z=box.center_z_mm + s.side_seam_z_offset_mm + self._clearance(),
                 theta=SIDE_SEAM_THETA_DEG,
             ),
         )
-        await self.motion.move(
-            component_name=s.blade_frame,
-            destination=self._blade_pose(theta=blade_theta),
-        )
-        await self.motion.move(
-            component_name=s.tool_frame,
-            destination=self._tool_pose(
-                # Back off along the seam, so the stroke that follows cuts
-                # through its whole length rather than starting mid-tape.
-                x=-CUT_SIGN * s.seam_offset_fraction * box.flap_width_mm,
-                y=approach_lateral,
-                z=0.0,
-            ),
+        await self._move(s.blade_frame, self._blade_pose(theta=blade_theta))
+        await self._tool_move(
+            # Back off along the seam, so the stroke that follows cuts
+            # through its whole length rather than starting mid-tape.
+            x=-CUT_SIGN * s.seam_offset_fraction * box.flap_width_mm,
+            y=approach_lateral,
         )
 
     # --- converge -------------------------------------------------------------
@@ -847,10 +923,7 @@ class Control(Generic, EasyResource):
         while iterations < s.converge_max_iterations:
             # A zero step is the script's no-op first move; skip the round trip.
             if delta != (0.0, 0.0):
-                await self.motion.move(
-                    component_name=s.tool_frame,
-                    destination=self._tool_pose(x=delta[0], y=delta[1], z=0.0),
-                )
+                await self._tool_move(x=delta[0], y=delta[1])
             iterations += 1
 
             images, _ = await self.camera.get_images()
@@ -988,23 +1061,23 @@ class Control(Generic, EasyResource):
         chunks = [f * box.height_mm for f in s.top_seam_chunks]
         cut_distance = sum(chunks)
 
-        await self._tool_move(z=s.top_blade_insert_mm)
+        await self._tool_move(z=s.top_blade_insert_mm, plunge="top:insert")
         steps.append("insert")
         for chunk in chunks:
             await self._tool_move(x=CUT_SIGN * chunk)
             steps.append("slice_forward")
-        await self._tool_move(z=-s.top_blade_insert_mm)
+        await self._tool_move(z=-s.top_blade_insert_mm, plunge="top:retract")
         steps.append("retract")
 
         await self._tool_move(x=-CUT_SIGN * cut_distance)
         steps.append("return_to_center")
 
-        await self._tool_move(z=s.top_blade_insert_mm)
+        await self._tool_move(z=s.top_blade_insert_mm, plunge="top:insert")
         steps.append("insert")
         for chunk in chunks:
             await self._tool_move(x=-CUT_SIGN * chunk)
             steps.append("slice_back")
-        await self._tool_move(z=-(s.top_blade_insert_mm))
+        await self._tool_move(z=-(s.top_blade_insert_mm), plunge="top:retract")
         steps.append("retract")
         return steps
 
@@ -1014,19 +1087,24 @@ class Control(Generic, EasyResource):
         if seam == SEAM_FAR:
             insert_z = s.side_blade_insert_mm
             retract_z = -s.side_blade_insert_mm
+            retract_plunge = "far:retract"
             straighten_theta = s.blade_angle_deg
         else:
-            # NOTE: this is a hack, no time to debug
-            # for closer seam, for some reason, the blade is further away, so we need
-            # to insert it more
-            insert_z = s.side_blade_insert_mm + 7
+            insert_z = s.side_blade_insert_mm + CLOSE_SEAM_EXTRA_INSERT_MM
             # The close seam pulls far clear of the box on the way out, not just
             # back out of the tape.
             retract_z = -CLOSE_SEAM_RETRACT_MM
+            if self._dry_run:
+                # The insert was skipped, so pull back only the clearance beyond
+                # it: the tool rises as far above its approach as a real run's
+                # retract does.
+                retract_z += insert_z
+            # Not a plunge: part of it clears the box, so a dry run keeps it.
+            retract_plunge = None
             straighten_theta = -s.blade_angle_deg
 
         steps = []
-        await self._tool_move(z=insert_z)
+        await self._tool_move(z=insert_z, plunge=f"{seam}:insert")
         steps.append("insert")
         await self._tool_move(
             x=CUT_SIGN * s.side_seam_slice_mm,
@@ -1037,12 +1115,9 @@ class Control(Generic, EasyResource):
             ),
         )
         steps.append("slice")
-        await self._tool_move(z=retract_z)
+        await self._tool_move(z=retract_z, plunge=retract_plunge)
         steps.append("retract")
-        await self.motion.move(
-            component_name=s.blade_frame,
-            destination=self._blade_pose(theta=straighten_theta),
-        )
+        await self._move(s.blade_frame, self._blade_pose(theta=straighten_theta))
         steps.append("straighten_blade")
         if seam == SEAM_CLOSE:
             await self._tool_move(theta=CLOSE_SEAM_FINAL_THETA_DEG)
@@ -1116,6 +1191,10 @@ class Control(Generic, EasyResource):
 
     # --- pose helpers ---------------------------------------------------------
 
+    def _clearance(self) -> float:
+        """Extra standoff a dry run adds to every approach, to hold the blade clear."""
+        return self.settings.dry_run_clearance_mm if self._dry_run else 0.0
+
     def _world_pose(self, x, y, z, theta: float = 0.0) -> PoseInFrame:
         return PoseInFrame(
             reference_frame=self.settings.world_frame,
@@ -1135,11 +1214,36 @@ class Control(Generic, EasyResource):
             pose=Pose(x=0, y=0, z=0, o_x=0, o_y=0, o_z=1, theta=theta),
         )
 
-    async def _tool_move(self, x=0.0, y=0.0, z=0.0, theta=0.0, constraints=None):
+    async def _move(self, component_name, destination, constraints=None, plunge=None):
+        """Every arm move goes through here, so a dry run can gate them all.
+
+        `plunge` labels a blade insert or retract ("<seam>:<insert|retract>").
+        A dry run records the label and skips the move: the blade never goes
+        in, so there is nothing to pull back out of either. `_cut_side_seam`
+        also reads the flag, to shorten the close-seam retract by the skipped
+        insert. Before sending, a dry run also checks the frames exist and, if
+        a workspace is configured, that the target stays inside it.
+        """
+        if self._dry_run:
+            await self._check_frames()
+            if plunge is not None:
+                self._skipped.append(plunge)
+                return
+            await self._check_bounds(component_name, destination)
         await self.motion.move(
-            component_name=self.settings.tool_frame,
-            destination=self._tool_pose(x=x, y=y, z=z, theta=theta),
+            component_name=component_name,
+            destination=destination,
             constraints=constraints,
+        )
+
+    async def _tool_move(
+        self, x=0.0, y=0.0, z=0.0, theta=0.0, constraints=None, plunge=None
+    ):
+        await self._move(
+            self.settings.tool_frame,
+            self._tool_pose(x=x, y=y, z=z, theta=theta),
+            constraints=constraints,
+            plunge=plunge,
         )
 
     async def _endpoint_world(self, px, z, intr):
@@ -1147,17 +1251,81 @@ class Control(Generic, EasyResource):
         pif = await self._to_frame((ex, ey, ez), self.settings.world_frame)
         return (pif.pose.x, pif.pose.y, pif.pose.z)
 
-    async def _to_frame(self, point_xyz, dest_frame):
-        """Transform a camera-frame point (mm) into dest_frame."""
+    async def _transform(self, pose_in_frame: PoseInFrame, dest_frame: str):
+        """`transform_pose` through the lazily opened robot client."""
         if not self.robot_client:
             self.robot_client = await create_robot_client_from_module()
+        return await self.robot_client.transform_pose(pose_in_frame, dest_frame)
 
+    async def _to_frame(self, point_xyz, dest_frame):
+        """Transform a camera-frame point (mm) into dest_frame."""
         x, y, z = point_xyz
         observer_pose = PoseInFrame(
             reference_frame=self.settings.camera_frame,
             pose=Pose(x=x, y=y, z=z, o_x=0, o_y=0, o_z=1, theta=0),
         )
-        return await self.robot_client.transform_pose(observer_pose, dest_frame)
+        return await self._transform(observer_pose, dest_frame)
+
+    async def _check_frames(self) -> None:
+        """Fail a dry run on a frame the frame system does not know, before it moves.
+
+        Transforming a zero pose works however the frame is defined (a
+        component's frame or an extra transform), which a config lookup would not.
+        """
+        if self._frames_checked:
+            return
+        if not self.robot_client:
+            self.robot_client = await create_robot_client_from_module()
+        s = self.settings
+        for frame in (s.tool_frame, s.blade_frame, s.camera_frame, s.world_frame):
+            try:
+                await self._transform(
+                    PoseInFrame(
+                        reference_frame=frame,
+                        pose=Pose(x=0, y=0, z=0, o_x=0, o_y=0, o_z=1, theta=0),
+                    ),
+                    s.world_frame,
+                )
+            except Exception as e:
+                raise ValueError(
+                    f"dry run: frame {frame!r} is not in the frame system ({e})"
+                ) from e
+        self._frames_checked = True
+
+    async def _check_bounds(self, component_name: str, destination: PoseInFrame) -> None:
+        """Refuse a dry-run move whose target leaves the configured workspace.
+
+        A tool-relative destination is transformed to the world frame first,
+        which is exactly where the move will put the tool. Blade rotations are
+        not checked (see below).
+        """
+        s = self.settings
+        if s.workspace_min_xyz is None:
+            return
+        if destination.reference_frame == s.blade_frame:
+            # A blade move is a rotation about the blade origin: that point
+            # stays where it is, so there is nothing new to check.
+            return
+        if destination.reference_frame == s.world_frame:
+            pose = destination.pose
+        else:
+            pose = (await self._transform(destination, s.world_frame)).pose
+        outside = [
+            f"{axis}={value:.1f} not in [{lo:.1f}, {hi:.1f}]"
+            for axis, value, lo, hi in zip(
+                "xyz",
+                (pose.x, pose.y, pose.z),
+                s.workspace_min_xyz,
+                s.workspace_max_xyz,
+            )
+            if not lo <= value <= hi
+        ]
+        if outside:
+            raise ValueError(
+                f"dry run: {component_name} move leaves the workspace "
+                "(world frame; workspace_min_xyz/workspace_max_xyz): "
+                + "; ".join(outside)
+            )
 
     async def get_status(
         self, *, timeout: Optional[float] = None, **kwargs

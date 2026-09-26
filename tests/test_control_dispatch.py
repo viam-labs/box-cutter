@@ -9,6 +9,8 @@ from viam.media.video import CameraMimeType
 
 from models.control import (
     BOX_PRESETS,
+    CLOSE_SEAM_EXTRA_INSERT_MM,
+    CLOSE_SEAM_RETRACT_MM,
     CUT_SIGN,
     FAR_SEAM_APPROACH_LATERAL_MM,
     SIDE_SEAM_THETA_DEG,
@@ -65,18 +67,27 @@ class _FakeCamera:
 class _FakeRobotClient:
     """Stands in for RobotClient.transform_pose.
 
-    `world` passes the camera-frame point through unchanged; the tool frame is
-    offset so tests can tell the two apart.
+    Camera-frame points pass through unchanged to `world`. A camera point sent
+    to the tool frame, or a tool-frame pose sent to `world`, is offset by
+    TOOL_OFFSET so tests can tell them apart. `fail_frames` makes a source
+    frame raise, as a frame missing from the frame system would.
     """
     TOOL_OFFSET = (1.0, 2.0, 3.0)
 
-    def __init__(self):
+    def __init__(self, fail_frames=()):
         self.requests = []
+        self.fail_frames = set(fail_frames)
 
     async def transform_pose(self, pose_in_frame, dest_frame):
         self.requests.append((pose_in_frame, dest_frame))
+        source = pose_in_frame.reference_frame
+        if source in self.fail_frames:
+            raise RuntimeError(f"frame {source} not found")
         p = pose_in_frame.pose
-        if dest_frame == "world":
+        # Camera points pass straight through to world. A camera point sent
+        # to the tool frame, or a tool-frame pose sent to world, is offset so
+        # tests can tell them apart.
+        if dest_frame == "world" and source != "tool":
             x, y, z = p.x, p.y, p.z
         else:
             dx, dy, dz = self.TOOL_OFFSET
@@ -585,8 +596,7 @@ async def test_cut_top_slices_both_halves_from_the_center():
 
 @pytest.mark.asyncio
 async def test_cut_far_seam_slices_under_a_linear_constraint():
-    # side_blade_insert_mm defaults to 0 while it is being tuned; set it so the
-    # insert and retract are distinguishable.
+    # Pin the insert rather than rely on the default, which is still being tuned.
     ctrl = await _control_with_box_frame(attrs={"side_blade_insert_mm": 16})
     ctrl.motion.moves.clear()
     out = await ctrl.do_command({"command": "cut", "seam": SEAM_FAR})
@@ -613,8 +623,9 @@ async def test_cut_close_seam_retracts_clear():
     ]
     s = ctrl.settings
     moves = ctrl.motion.moves
-    # The close seam inserts 7 mm deeper than configured (see _cut_side_seam).
-    assert moves[0][1].pose.z == pytest.approx(s.side_blade_insert_mm + 7)
+    assert moves[0][1].pose.z == pytest.approx(
+        s.side_blade_insert_mm + CLOSE_SEAM_EXTRA_INSERT_MM
+    )
     assert moves[2][1].pose.z == pytest.approx(-40.0)
     assert moves[3][1].pose.theta == pytest.approx(-s.blade_angle_deg)
     assert moves[4][1].pose.theta == pytest.approx(90.0)
@@ -767,3 +778,220 @@ async def test_stop_with_nothing_running_still_halts_the_arm():
     out = await ctrl.do_command({"command": "stop"})
     assert out == {"stopped": True, "interrupted": None}
     assert ctrl.arm.stops == 1
+
+
+# --- dry run ------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_full_cut_without_dry_run_adds_no_transforms():
+    ctrl = _make_control()
+    await ctrl.do_command({"command": "set_box", "preset": "box_1"})
+    ctrl.camera = _ServoCamera([int(ctrl.settings.blade_x_px)])
+    out = await ctrl.do_command({"command": "full_cut"})
+    assert out["completed"] is True
+    # Only find_center's two transforms (camera -> world, camera -> tool).
+    assert len(ctrl.robot_client.requests) == 2
+    assert "dry_run" not in out
+    # every move, blade inserts and retracts included
+    assert len(ctrl.motion.moves) == 29
+
+
+@pytest.mark.asyncio
+async def test_dry_run_top_cut_skips_the_blade_in_and_out():
+    ctrl = await _control_with_box_frame()
+    ctrl.motion.moves.clear()
+    out = await ctrl.do_command({"command": "cut", "seam": SEAM_TOP, "dry_run": True})
+    assert out["completed"] is True
+    assert out["dry_run"] is True
+    assert out["skipped"] == ["top:insert", "top:retract", "top:insert", "top:retract"]
+    # 3 forward chunks, the return to center, 3 back chunks -- all level.
+    assert len(ctrl.motion.moves) == 7
+    assert all(dest.pose.z == 0 for _, dest, _ in ctrl.motion.moves)
+
+
+@pytest.mark.asyncio
+async def test_dry_run_close_retract_keeps_the_extra_pull_back():
+    ctrl = await _control_with_box_frame(attrs={"side_blade_insert_mm": 16})
+    ctrl.motion.moves.clear()
+    out = await ctrl.do_command({"command": "cut", "seam": SEAM_CLOSE, "dry_run": True})
+    assert out["skipped"] == ["close:insert"]
+    slice_move, retract, straighten_blade, straighten_tool = ctrl.motion.moves
+    # The insert (16 mm plus the close seam's extra) was skipped, so only the
+    # clearance beyond it is pulled back.
+    assert retract[1].pose.z == pytest.approx(
+        -(CLOSE_SEAM_RETRACT_MM - 16 - CLOSE_SEAM_EXTRA_INSERT_MM)
+    )
+
+
+@pytest.mark.asyncio
+async def test_dry_run_full_cut_lists_every_skipped_move():
+    ctrl = _make_control()
+    await ctrl.do_command({"command": "set_box", "preset": "box_1"})
+    ctrl.camera = _ServoCamera([int(ctrl.settings.blade_x_px)])
+    out = await ctrl.do_command({"command": "full_cut", "dry_run": True})
+    assert out["completed"] is True
+    assert out["skipped"] == [
+        "top:insert", "top:retract", "top:insert", "top:retract",
+        "far:insert", "far:retract",
+        "close:insert",
+    ]
+    assert out["bounds_checked"] is False  # no workspace configured
+
+
+@pytest.mark.asyncio
+async def test_dry_run_is_ignored_on_commands_that_do_not_move():
+    ctrl = _make_control()
+    out = await ctrl.do_command({"command": "set_box", "preset": "box_1", "dry_run": True})
+    assert "dry_run" not in out
+    assert ctrl._dry_run is False
+
+
+@pytest.mark.asyncio
+async def test_dry_run_must_be_a_bool():
+    ctrl = _make_control()
+    with pytest.raises(ValueError, match="'dry_run' must be true or false"):
+        await ctrl.do_command({"command": "home", "dry_run": "false"})
+    assert ctrl.motion.moves == []
+
+
+@pytest.mark.asyncio
+async def test_stopped_dry_run_does_not_leak_into_the_next_real_run():
+    motion = _BlockingMotion()
+    ctrl = await _control_with_box_frame(motion=motion)
+    ctrl.arm = _FakeArm()
+    running = asyncio.create_task(
+        ctrl.do_command({"command": "cut", "seam": SEAM_TOP, "dry_run": True})
+    )
+    await motion.started.wait()
+    await ctrl.do_command({"command": "stop"})
+    assert (await running)["stopped"] is True
+    assert ctrl._dry_run is False
+
+    ctrl.motion = _RecordingMotion()
+    out = await ctrl.do_command({"command": "cut", "seam": SEAM_TOP})
+    assert "dry_run" not in out
+    # The real cut sends its inserts and retracts: 4 z moves plus 7 slices.
+    assert len(ctrl.motion.moves) == 11
+
+
+@pytest.mark.asyncio
+async def test_dry_run_move_to_center_stops_higher():
+    ctrl = _make_control()
+    await ctrl.do_command({"command": "set_box", "preset": "box_1"})
+    out = await ctrl.do_command({"command": "move_to_center", "dry_run": True})
+    s = ctrl.settings
+    assert s.dry_run_clearance_mm > 0
+    _, dest, _ = ctrl.motion.moves[-1]
+    assert dest.pose.z == pytest.approx(
+        out["box_frame"]["knife_tip_to_top_mm"]
+        - s.center_standoff_mm
+        - s.dry_run_clearance_mm
+    )
+
+
+@pytest.mark.asyncio
+async def test_dry_run_side_seam_approach_stops_higher():
+    ctrl = await _control_with_box_frame()
+    ctrl.motion.moves.clear()
+    await ctrl.do_command({"command": "move_to_seam", "seam": SEAM_FAR, "dry_run": True})
+    s, box = ctrl.settings, ctrl._box_data
+    assert s.dry_run_clearance_mm > 0
+    stage = ctrl.motion.moves[0]
+    assert stage[1].pose.z == pytest.approx(
+        box.center_z_mm + s.side_seam_z_offset_mm + s.dry_run_clearance_mm
+    )
+
+
+@pytest.mark.asyncio
+async def test_dry_run_refuses_a_missing_frame_before_moving():
+    ctrl = _make_control()
+    ctrl.robot_client = _FakeRobotClient(fail_frames={"blade"})
+    with pytest.raises(ValueError, match="frame 'blade'"):
+        await ctrl.do_command({"command": "home", "dry_run": True})
+    assert ctrl.motion.moves == []
+
+
+@pytest.mark.asyncio
+async def test_real_run_skips_the_frame_check():
+    ctrl = _make_control()
+    ctrl.robot_client = _FakeRobotClient(fail_frames={"blade"})
+    await ctrl.do_command({"command": "home"})
+    assert len(ctrl.motion.moves) == 1
+    assert ctrl.robot_client.requests == []
+
+
+@pytest.mark.asyncio
+async def test_dry_run_checks_frames_once_per_command():
+    ctrl = _make_control()
+    await ctrl.do_command({"command": "set_box", "preset": "box_1"})
+    ctrl.camera = _ServoCamera([int(ctrl.settings.blade_x_px)])
+    await ctrl.do_command({"command": "full_cut", "dry_run": True})
+    zero_pose_checks = [
+        pif.reference_frame for pif, dest in ctrl.robot_client.requests
+        if dest == "world" and pif.pose.x == 0 and pif.pose.y == 0 and pif.pose.z == 0
+    ]
+    assert zero_pose_checks == ["tool", "blade", "cam", "world"]
+
+
+_WIDE = {"workspace_min_xyz": [-5000, -5000, -5000], "workspace_max_xyz": [5000, 5000, 5000]}
+
+
+@pytest.mark.asyncio
+async def test_dry_run_refuses_a_world_target_outside_the_workspace():
+    ctrl = _make_control(attrs={
+        "workspace_min_xyz": [0, 0, 0], "workspace_max_xyz": [100, 100, 100],
+    })
+    with pytest.raises(ValueError, match=r"leaves the workspace .*: x=400\.0"):
+        await ctrl.do_command({"command": "home", "dry_run": True})
+    assert ctrl.motion.moves == []
+
+
+@pytest.mark.asyncio
+async def test_dry_run_checks_relative_moves_in_world_coordinates():
+    # The fake adds TOOL_OFFSET (1, 2, 3) to a tool-frame pose sent to world,
+    # so a 10 mm jog along tool x lands at world x = 11 -- a property of the
+    # fake, not the cell: a real client also rotates the step by the tool's
+    # orientation. Without the transform the check would see x = 10.
+    ctrl = _make_control(attrs={
+        "workspace_min_xyz": [0, 0, 0], "workspace_max_xyz": [5, 100, 100],
+    })
+    with pytest.raises(ValueError, match=r"x=11\.0 not in \[0\.0, 5\.0\]"):
+        await ctrl.do_command({"command": "jog", "x": 10, "dry_run": True})
+    assert ctrl.motion.moves == []
+
+
+@pytest.mark.asyncio
+async def test_dry_run_full_cut_inside_the_workspace_reports_bounds_checked():
+    ctrl = _make_control(attrs=_WIDE)
+    await ctrl.do_command({"command": "set_box", "preset": "box_1"})
+    ctrl.camera = _ServoCamera([int(ctrl.settings.blade_x_px)])
+    out = await ctrl.do_command({"command": "full_cut", "dry_run": True})
+    assert out["completed"] is True
+    assert out["bounds_checked"] is True
+
+
+@pytest.mark.asyncio
+async def test_real_run_ignores_the_workspace():
+    ctrl = _make_control(attrs={
+        "workspace_min_xyz": [0, 0, 0], "workspace_max_xyz": [100, 100, 100],
+    })
+    await ctrl.do_command({"command": "home"})
+    assert len(ctrl.motion.moves) == 1
+
+
+@pytest.mark.asyncio
+async def test_dry_run_does_not_bounds_check_blade_rotations():
+    ctrl = await _control_with_box_frame(attrs=_WIDE)
+    await ctrl.do_command({"command": "move_to_seam", "seam": SEAM_FAR, "dry_run": True})
+    blade_requests = [
+        pif for pif, _ in ctrl.robot_client.requests if pif.reference_frame == "blade"
+    ]
+    assert len(blade_requests) == 1  # the frame check only, not the blade tilt
+
+
+@pytest.mark.asyncio
+async def test_real_run_jog_with_a_workspace_makes_no_transforms():
+    ctrl = _make_control(attrs=_WIDE)
+    await ctrl.do_command({"command": "jog", "x": 10})
+    assert len(ctrl.motion.moves) == 1
+    assert ctrl.robot_client.requests == []

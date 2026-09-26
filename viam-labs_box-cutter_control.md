@@ -66,17 +66,17 @@ The machine must be configured with:
 
 | Name | Type | Inclusion | Default | Description |
 |---|---|---|---|---|
-| `home_xyz` | [float × 3] | Optional | `[-4, -551, 470]` | Home pose of the tool in the world frame; blade vertical, pointing down. |
-| `stopper_y_mm` | float | Optional | `-450` | World Y of the physical box stopper. |
-| `knife_tip_to_table_mm` | float | Optional | `490` | Knife tip height above the table at arm home. |
+| `home_xyz` | [float × 3] | Optional | `[399.97, 0, 406.48]` | Home pose of the tool in the world frame; blade vertical, pointing down. |
+| `stopper_x_mm` | float | Optional | `332` | World X of the physical box stopper, which the box's close edge rests against. |
+| `knife_tip_to_table_mm` | float | Optional | `435` | Knife tip height above the table at arm home. |
 | `base_plate_height_mm` | float | Optional | `20` | Height of the plate the arm is bolted to. |
 
 #### Visual servoing
 
 | Name | Type | Inclusion | Default | Description |
 |---|---|---|---|---|
-| `blade_x_px` | float | Optional | `339` | Pixel column the blade occupies in the camera frame. |
-| `servo_jacobian` | [float × 4] | Optional | `[-1, 0.1, 0.2, -1]` | Image Jacobian `[du/dX, du/dY, dv/dX, dv/dY]`. |
+| `blade_x_px` | float | Optional | `344` | Pixel column the blade occupies in the camera frame. |
+| `servo_jacobian` | [float × 4] | Optional | `[0, 3.2, -3.2, 0]` | Image Jacobian `[du/dX, du/dY, dv/dX, dv/dY]`. |
 | `seam_search_radius_px` | int | Optional | `40` | Ignore seam lines further than this from the blade column. |
 | `converge_tolerance_px` | float | Optional | `2.25` | Pixel error at which a seam counts as converged. |
 | `converge_max_iterations` | int | Optional | `25` | Servo iterations before giving up. |
@@ -91,15 +91,27 @@ The machine must be configured with:
 |---|---|---|---|---|
 | `center_standoff_mm` | float | Optional | `20` | How far above the box top the tool stops on `move_to_center`. |
 | `top_blade_insert_mm` | float | Optional | `25` | Blade insertion depth for the top seam. |
-| `side_blade_insert_mm` | float | Optional | `16` | Blade insertion depth for the side seams. |
-| `top_seam_chunks` | [float] | Optional | `[0.2, 0.2, 0.25]` | Top-seam pass split into these fractions of box height; their sum is the travel per direction. |
-| `side_seam_slice_mm` | float | Optional | `90` | Slice distance along each side seam. |
-| `blade_angle_deg` | float | Optional | `30` | Blade tilt applied before a side cut, and undone after. |
-| `seam_offset_fraction` | float | Optional | `0.45` | Side-seam approach offset, as a fraction of flap width. |
-| `side_seam_z_offset_mm` | float | Optional | `15` | Height above the box top for the side-seam approach. |
+| `side_blade_insert_mm` | float | Optional | `16` | Blade insertion depth for the side seams. The close seam inserts 7 mm deeper than this. Must not exceed 33, so the close-seam insert stays within its 40 mm retract. |
+| `top_seam_chunks` | [float] | Optional | `[0.15, 0.15, 0.25]` | Top-seam pass split into these fractions of box height; their sum is the travel per direction. |
+| `side_seam_slice_mm` | float | Optional | `65` | Slice distance along each side seam. |
+| `blade_angle_deg` | float | Optional | `15` | Blade tilt applied before a side cut, and undone after. |
+| `seam_offset_fraction` | float | Optional | `0.55` | Side-seam approach offset, as a fraction of flap width. |
+| `side_seam_z_offset_mm` | float | Optional | `10` | Height above the box top for the side-seam approach. |
 | `descent_tolerance_mm` | float | Optional | `10` | Linear tolerance for the descent to box center. |
 | `cut_tolerance_mm` | float | Optional | `3` | Linear tolerance for a side-seam slice. |
 | `seam_match_tolerance_mm` | float | Optional | `40` | How close the tool must be to a seam for `cut` to infer it. |
+
+#### Dry run
+
+Only used during a dry run, but validated at config time — an invalid
+`workspace_min_xyz`/`workspace_max_xyz` or a negative `dry_run_clearance_mm`
+blocks the config even if every run is a real one.
+
+| Name | Type | Inclusion | Default | Description |
+|---|---|---|---|---|
+| `dry_run_clearance_mm` | float | Optional | `30` | Extra height added to every approach standoff during a dry run. Must not be negative. |
+| `workspace_min_xyz` | [float × 3] | Optional | — | Lower corner of the allowed volume for the knife tip, world frame. Set together with `workspace_max_xyz`. |
+| `workspace_max_xyz` | [float × 3] | Optional | — | Upper corner. Must not be below `workspace_min_xyz` on any axis. |
 
 ## DoCommand
 
@@ -119,6 +131,92 @@ raises a `busy` error. `stop` and `get_properties` are always accepted.
 ```json
 { "command": "stop" }
 ```
+
+### Dry run
+
+`home`, `jog`, `move_to_center`, `move_to_seam`, `converge`, `cut`, and
+`full_cut` accept a `"dry_run": true` key. A non-boolean `dry_run` is rejected
+on every command that reaches the busy check — only `stop` and
+`get_properties` never look at it. A boolean `dry_run` on any other command
+(e.g. `set_box`, `find_center`, `tool_change`) is accepted but ignored.
+
+The arm runs the real sequence, but:
+
+- blade inserts and retracts are skipped and recorded in `skipped`, in order,
+  as `"<seam>:<insert|retract>"`;
+- the close seam's retract, which is a real move (it pulls clear of the box,
+  not just out of the tape), is shortened by the skipped insert depth;
+- every approach standoff is raised by `dry_run_clearance_mm`;
+- before the first move, `tool_frame`, `blade_frame`, `camera_frame`, and
+  `world_frame` must all exist in the frame system;
+- if `workspace_min_xyz`/`workspace_max_xyz` are configured, any move whose
+  target would leave that volume is refused before it is sent.
+
+`home` and `jog` have no approach standoff, so a dry run does not raise them:
+a dry-run `jog` with `z` moves the blade exactly as a real one does, including
+downward. "Blade held clear" does not apply to either — they are only frame-
+and bounds-checked.
+
+A real run (no `dry_run`, or `dry_run: false`) makes none of these checks and
+issues no extra calls.
+
+```json
+{ "command": "full_cut", "dry_run": true }
+```
+
+The response is the normal result plus:
+
+```json
+{
+  "dry_run": true,
+  "skipped": ["top:insert", "top:retract", "top:insert", "top:retract", "far:insert", "far:retract", "close:insert"],
+  "bounds_checked": true
+}
+```
+
+A dry run interrupted by `stop` returns the same plain response as any other
+interrupted command: `{"stopped": true, "command": "<name>"}` — no `dry_run`
+fields are added.
+
+**What the bounds check covers**
+
+- Bounds are in the world frame and cover the tool origin (the knife tip)
+  only — not the arm links, the camera, or the blade body. Blade rotations
+  aren't checked.
+- Only move *targets* are checked, not the planned path between them: a
+  free-space move such as `home` or a side-seam approach can swing outside
+  the workspace between its start and end pose without being caught.
+- A dry run checks only the targets of the raised path. A real run's targets
+  sit up to `dry_run_clearance_mm` plus the insert depth lower
+  (`top_blade_insert_mm` on the top seam, `side_blade_insert_mm` on the side
+  seams, plus 7 mm on the close seam), and more after `converge`, which
+  settles differently at the real height. For a passing dry run to mean
+  anything about the real one, set `workspace_min_xyz`'s z at least
+  `dry_run_clearance_mm` + the deepest insert depth, plus a margin, **above**
+  the lowest height the knife tip may safely reach.
+- Without `workspace_min_xyz`/`workspace_max_xyz` configured, the dry run
+  still runs, logs a warning, and returns `"bounds_checked": false`.
+- The per-move bounds check costs one extra `transform_pose` call, and only
+  when a workspace is configured and the move is tool-relative (not already
+  in the world frame, and not a blade-frame rotation). Separately, the frame
+  check on the first move of each dry run makes 4 `transform_pose` calls, one
+  per configured frame.
+
+**`converge` in a dry run** servos from the raised height. The servo Jacobian
+and pixel settings were tuned at the real standoff, so `iterations` and
+`error_px` won't match a real run exactly — use it to confirm direction, not
+tuning.
+
+**Commissioning a new box or cell:** run `full_cut` with `dry_run` first and
+confirm every move goes the way you expect, then run it for real.
+
+**Caveat:** a dry-run `cut` only stays clear of the box if the move that
+positioned the arm was also a dry run (`full_cut`, or `move_to_center` /
+`move_to_seam` with `dry_run`). After a real `move_to_center`, a dry-run top
+cut slices at the real `center_standoff_mm` standoff, where a raised flap can
+still be hit. After a real `move_to_seam`, a dry-run side cut slices at the
+real approach height with only the insert skipped, so the blade can still
+touch the box.
 
 ### `set_box`
 
