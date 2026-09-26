@@ -532,7 +532,7 @@ async def test_move_to_seam_stages_the_close_side_seam_at_the_stopper():
     stage, blade, offset = ctrl.motion.moves
     assert stage[1].pose.x == pytest.approx(ctrl.settings.stopper_x_mm)
     assert blade[1].pose.theta == pytest.approx(ctrl.settings.blade_angle_deg)
-    assert offset[1].pose.y == pytest.approx(0.0)
+    assert offset[1].pose.y == pytest.approx(-FAR_SEAM_APPROACH_LATERAL_MM)
 
 
 @DETECTION_DISABLED
@@ -613,7 +613,8 @@ async def test_cut_close_seam_retracts_clear():
     ]
     s = ctrl.settings
     moves = ctrl.motion.moves
-    assert moves[0][1].pose.z == pytest.approx(s.side_blade_insert_mm)
+    # The close seam inserts 7 mm deeper than configured (see _cut_side_seam).
+    assert moves[0][1].pose.z == pytest.approx(s.side_blade_insert_mm + 7)
     assert moves[2][1].pose.z == pytest.approx(-40.0)
     assert moves[3][1].pose.theta == pytest.approx(-s.blade_angle_deg)
     assert moves[4][1].pose.theta == pytest.approx(90.0)

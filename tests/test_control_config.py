@@ -52,8 +52,8 @@ def test_settings_from_config_defaults():
 
 def test_settings_defaults_carry_the_measured_ground_truth():
     s = Settings.from_config(_config({"camera": "c", "arm": "a", "tool_frame": "t"}))
-    assert s.stopper_x_mm == 370.0
-    assert s.knife_tip_to_table_mm == 490.0
+    assert s.stopper_x_mm == 332.0
+    assert s.knife_tip_to_table_mm == 435.0
     assert s.base_plate_height_mm == 20.0
     assert s.home_xyz == (399.97, 0.0, 406.48)
 
@@ -111,8 +111,8 @@ def test_settings_rejects_empty_top_seam_chunks():
 
 def test_top_seam_span_is_the_sum_of_its_chunks():
     s = Settings.from_config(_config({"camera": "c", "arm": "a", "tool_frame": "t"}))
-    assert s.top_seam_chunks == (0.2, 0.2, 0.25)
-    assert s.top_seam_span_fraction == pytest.approx(0.65)
+    assert s.top_seam_chunks == (0.15, 0.15, 0.25)
+    assert s.top_seam_span_fraction == pytest.approx(0.55)
 
     cfg = _config({
         "camera": "c", "arm": "a", "tool_frame": "t", "top_seam_chunks": [0.5, 0.25],
