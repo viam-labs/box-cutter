@@ -9,6 +9,7 @@ Seam names throughout are from the blade's point of view at the box:
   close -- the side seam at the stopper, nearest the robot base
 """
 
+import asyncio
 import os
 from dataclasses import dataclass
 from typing import ClassVar, Mapping, Optional, Sequence, Tuple
@@ -339,6 +340,12 @@ class Settings:
 class Control(Generic, EasyResource):
     MODEL: ClassVar[Model] = Model(ModelFamily("viam-labs", "box-cutter"), "control")
 
+    # Opened lazily by `_to_frame` and kept across reconfigures: it is built from
+    # the module's environment, which a reconfigure does not change.
+    robot_client: Optional[RobotClient] = None
+    # The command currently driving the arm, so `stop` can cancel it.
+    _task: Optional[asyncio.Task] = None
+
     @classmethod
     def new(
         cls, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
@@ -376,7 +383,6 @@ class Control(Generic, EasyResource):
         self.motion: MotionClient = self._resolve(
             dependencies, MotionClient.get_resource_name(settings.motion_name)
         )
-        self.robot_client = None
         # Per-box state cannot outlive a reconfigure: new geometry would be read
         # against measurements taken for the previous setup.
         self._box_override: Optional[dict] = None
@@ -405,9 +411,39 @@ class Control(Generic, EasyResource):
         name = command.get("command")
         if not name:
             raise ValueError("do_command requires a 'command' key")
-        seam = self._seam_arg(command)
+        if name == "stop":
+            return await self.stop()
         if name == "get_properties":
             return await self.get_properties()
+
+        # One command drives the arm at a time: two interleaved sequences would
+        # issue each other's moves, and `stop` could only cancel one of them.
+        if self._task is not None:
+            raise ValueError(
+                f"busy running {self._task.get_name()!r}; send 'stop' first"
+            )
+        task = asyncio.create_task(self._dispatch(name, command), name=name)
+        self._task = task
+        try:
+            # `wait` rather than `await task`, so a `stop` cancelling the task
+            # comes back as a result instead of cancelling this caller too.
+            await asyncio.wait([task])
+        except asyncio.CancelledError:
+            # The caller went away (e.g. the client disconnected): don't leave
+            # the arm running a sequence nobody is watching.
+            task.cancel()
+            raise
+        finally:
+            if self._task is task:
+                self._task = None
+        if task.cancelled():
+            return {"stopped": True, "command": name}
+        return task.result()
+
+    async def _dispatch(
+        self, name: str, command: Mapping[str, ValueTypes]
+    ) -> Mapping[str, ValueTypes]:
+        seam = self._seam_arg(command)
         if name == "set_box":
             return self.set_box(command)
         if name == "home":
@@ -593,6 +629,20 @@ class Control(Generic, EasyResource):
         return result
 
     # --- staging motions ------------------------------------------------------
+
+    async def stop(self) -> Mapping[str, ValueTypes]:
+        """Cancel whatever command is driving the arm, then halt the arm.
+
+        Cancelling first means the interrupted sequence issues no further moves;
+        the arm stop then halts the move already in flight. The arm is left
+        where it stopped -- with a blade possibly in the tape, backing out is
+        the operator's call.
+        """
+        task = self._task
+        if task is not None:
+            task.cancel()
+        await self.arm.stop()
+        return {"stopped": True, "interrupted": task.get_name() if task else None}
 
     async def home(self) -> Mapping[str, ValueTypes]:
         await self._move_home()
@@ -1116,6 +1166,8 @@ class Control(Generic, EasyResource):
         raise NotImplementedError()
 
     async def close(self):
+        if self._task is not None:
+            self._task.cancel()
         if self.robot_client:
             await self.robot_client.close()
             self.robot_client = None
