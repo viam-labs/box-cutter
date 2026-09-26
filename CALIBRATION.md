@@ -1,24 +1,98 @@
-Guide on how to calibrate the box bot (an arm equipped with a camera and a cutting tool).
-Step 1: home position and the camera 
-Choose a home position and park the arm with the camera there. Then, physically measure the distance from the camera lens to the top of the box - this is "depth_mm", the first parameter of the box presets. This parameter configures how low does the arm descent when it moves to the center of the box. 
-Step 2: find the u,v pixels of the center of the box. This can be done in the camera control tab on the Viam app. Simply hover over the center of the box with the mouse coordinate on setting, and record the first value for u, and the second for v (2nd and 3rd parameters of the box presets). 
-Step 3: saving the box parameters. Write down the values above in the preset field of the module, and then use the "set_box" do command  to apply the preset. "set_box" also allows for fully manual box setting, where the user can supply all 5 required values for the box right from the viam app.
-Step 4: calculating the distance from the base of the arm to the closer edge of the box. Changaeble by "stopper_x_mm" config attribute - this distance is needed for accurate side seam stagings. An easy way to check it is to comment out the last 2 out of 3 moves in "stage_side_seam" for the close seam - the arm will stop at the stopper_x_mm value. 
-Step 5: cutting adjustments. These is the most experimental part, since it works with the blade. Depending on the "depth_mm" and "stopper_x_mm, the blade can be inserted too far or not enough into the box. The user can manipulate either the values above, or the insert_blade_mm config attribute, but it works slightly differently for top and side seams. 
+# Calibrating the box cutter
 
-Running the module: 
-- go to home
-- run set_box with either a preset or custom dimensions
-- run move_to_center
-- run convergence, and check that the blade is above the top seam
-- run cut or cut, "seam" : "top" (both should resolve) 
-- move_to_seam far
-- converge
-- cut 
-- move to seam close
-- converge
-- cut close
-- home
+How to calibrate the box bot: an arm with a camera and a cutting tool. All
+commands below are sent as `DoCommand` payloads, for example from the Viam
+app's control tab.
 
-If the whole process is working, running "full_cut" does all of the above steps (but the user should still set the box before).
-Jot something down
+## Step 1: home position and box depth
+
+Choose a home position (`home_xyz`) and park the arm there with
+`{"command": "home"}`. Physically measure the distance from the camera lens to
+the top of the box. This is `depth_mm`, the first box measurement. It sets how
+far the arm descends when it moves to the center of the box.
+
+## Step 2: box center pixel
+
+In the Viam app's camera control tab, turn on mouse coordinates and hover over
+the center of the box. The first value is `u` and the second is `v`.
+
+## Step 3: box size
+
+Measure two more values on the box:
+
+- `flap_width_mm`: the width of a flap, from the center seam to the side of the
+  box.
+- `box_height_mm`: the length of the top seam.
+
+## Step 4: apply the box
+
+Send all five values with `set_box`:
+
+```json
+{ "command": "set_box", "depth_mm": 525, "u": 358, "v": 225,
+  "flap_width_mm": 120, "box_height_mm": 280 }
+```
+
+Or apply a saved preset: `{"command": "set_box", "preset": "box_1"}`.
+
+Presets are hard-coded in `BOX_PRESETS` in `src/models/control.py`, not in the
+service config. Saving a new preset means editing that file and redeploying the
+module. `box_2` to `box_5` have no measured `box_height_mm` yet (it is `-1`),
+so `set_box` rejects them until one is added.
+
+## Step 5: cell geometry
+
+Set these config attributes on the service. They're needed to stage the side
+seams at the right place and height.
+
+- `stopper_x_mm`: the world X of the box's close edge, which rests against the
+  stopper. To measure it, `home`, then `jog` the knife tip until it sits over
+  the close edge. `jog` moves the tool in its own frame, up to 50 mm per axis
+  per call, for example `{"command": "jog", "x": 10}`. Its response includes
+  `world_after`: use that pose's `x`. Its `world_delta` shows which world axis
+  each tool axis moved, so check that first.
+- `knife_tip_to_table_mm`: the height of the knife tip above the table at home.
+- `base_plate_height_mm`: the thickness of the plate the arm is bolted to.
+
+## Step 6: blade column
+
+`converge` lines the seam up with the blade's pixel column, `blade_x_px`. If
+`converge` reports success but the blade ends up beside the seam rather than
+over it, adjust `blade_x_px` and try again.
+
+## Step 7: cutting depth
+
+This is the most experimental part, because it works with the blade. If the
+blade goes in too far or not far enough, first recheck `depth_mm` and
+`stopper_x_mm`. Then adjust the insert depths:
+
+- `top_blade_insert_mm` for the top seam.
+- `side_blade_insert_mm` for the far and close seams. The close seam currently
+  inserts a hard-coded 7 mm deeper than this (in `_cut_side_seam`), because
+  the blade sits further from the tape there.
+
+## Running the module
+
+```json
+{ "command": "home" }
+{ "command": "set_box", "preset": "box_1" }
+{ "command": "move_to_center" }
+{ "command": "converge", "seam": "top" }
+{ "command": "cut", "seam": "top" }
+{ "command": "move_to_seam", "seam": "far" }
+{ "command": "converge", "seam": "far" }
+{ "command": "cut", "seam": "far" }
+{ "command": "move_to_seam", "seam": "close" }
+{ "command": "converge", "seam": "close" }
+{ "command": "cut", "seam": "close" }
+{ "command": "home" }
+```
+
+- After each `converge`, check that the blade is over the seam before you cut.
+- Pass `seam` to `converge` on the side seams. Without it, `converge` servos
+  with the top-seam gain.
+- `cut` can leave out `seam` and work it out from the tool's position. Passing
+  it is safer.
+
+Once each step works, `{"command": "full_cut"}` runs the whole sequence, from
+`home` back to `home`. Run `set_box` first: `full_cut` doesn't set the box.
