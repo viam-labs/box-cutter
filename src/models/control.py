@@ -53,7 +53,13 @@ SEAMS = (SEAM_TOP, SEAM_FAR, SEAM_CLOSE)
 # Hand-tuned asymmetries from expirmental data that adjust the motion calls of the arm.
 # close seam retracts much further than it inserted, an in-between step to return home
 CLOSE_SEAM_RETRACT_MM = 40.0
-FAR_SEAM_APPROACH_LATERAL_MM = 5.0  # lateral nudge only the far approach uses
+# The close seam inserts this much deeper than `side_blade_insert_mm`: on the
+# cell the blade sits further from the tape there. A measured workaround, not an
+# explained one -- the cause (likely the close-seam staging or stopper_x_mm) is
+# still to be found.
+CLOSE_SEAM_EXTRA_INSERT_MM = 7.0
+# Lateral nudge on the side-seam approaches: + for the far seam, - for the close.
+FAR_SEAM_APPROACH_LATERAL_MM = 5.0
 # Which way along tool x the blade travels when slicing.
 CUT_SIGN = -1.0
 CLOSE_SEAM_FINAL_THETA_DEG = 90.0  # unwinds the tool after the last cut
@@ -332,13 +338,15 @@ class Settings:
                     + ", ".join(inverted)
                 )
 
-        # Above this, the close-seam retract (a fixed pull-back distance) would
-        # move toward the box instead of away from it.
+        # Above this, the close-seam insert would be deeper than its fixed
+        # retract, so the tool would turn with the blade still in the tape.
         side_blade_insert_mm = _num(config, "side_blade_insert_mm", 16.0)
-        if side_blade_insert_mm > CLOSE_SEAM_RETRACT_MM:
+        max_side_insert = CLOSE_SEAM_RETRACT_MM - CLOSE_SEAM_EXTRA_INSERT_MM
+        if side_blade_insert_mm > max_side_insert:
             raise ValueError(
-                "'side_blade_insert_mm' must not exceed the close-seam retract "
-                f"({CLOSE_SEAM_RETRACT_MM} mm)"
+                f"'side_blade_insert_mm' must not exceed {max_side_insert} mm: the "
+                f"close seam inserts {CLOSE_SEAM_EXTRA_INSERT_MM} mm deeper and "
+                f"retracts {CLOSE_SEAM_RETRACT_MM} mm"
             )
         return cls(
             camera_name=camera_name,
@@ -841,8 +849,8 @@ class Control(Generic, EasyResource):
 
         The far seam sits a box-height beyond the stopper; the close one sits at
         it. The blade tilts opposite ways for the two -- they are approached from
-        opposite sides of the box -- and only the far approach takes the lateral
-        nudge.
+        opposite sides of the box -- and take the lateral nudge in opposite
+        directions.
         """
         s = self.settings
         if seam == SEAM_FAR:
@@ -1082,10 +1090,7 @@ class Control(Generic, EasyResource):
             retract_plunge = "far:retract"
             straighten_theta = s.blade_angle_deg
         else:
-            # NOTE: this is a hack, no time to debug
-            # for closer seam, for some reason, the blade is further away, so we need
-            # to insert it more
-            insert_z = s.side_blade_insert_mm + 7
+            insert_z = s.side_blade_insert_mm + CLOSE_SEAM_EXTRA_INSERT_MM
             # The close seam pulls far clear of the box on the way out, not just
             # back out of the tape.
             retract_z = -CLOSE_SEAM_RETRACT_MM
@@ -1093,7 +1098,7 @@ class Control(Generic, EasyResource):
                 # The insert was skipped, so pull back only the clearance beyond
                 # it: the tool rises as far above its approach as a real run's
                 # retract does.
-                retract_z += s.side_blade_insert_mm
+                retract_z += insert_z
             # Not a plunge: part of it clears the box, so a dry run keeps it.
             retract_plunge = None
             straighten_theta = -s.blade_angle_deg

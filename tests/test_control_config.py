@@ -261,9 +261,9 @@ def test_settings_rejects_negative_dry_run_clearance():
 
 def test_settings_rejects_side_insert_deeper_than_close_retract():
     cfg = _config({
-        "camera": "c", "arm": "a", "tool_frame": "t", "side_blade_insert_mm": 41,
+        "camera": "c", "arm": "a", "tool_frame": "t", "side_blade_insert_mm": 34,
     })
-    with pytest.raises(ValueError, match="must not exceed the close-seam retract"):
+    with pytest.raises(ValueError, match=r"must not exceed 33\.0 mm"):
         Settings.from_config(cfg)
 
 

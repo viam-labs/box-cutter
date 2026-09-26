@@ -66,17 +66,17 @@ The machine must be configured with:
 
 | Name | Type | Inclusion | Default | Description |
 |---|---|---|---|---|
-| `home_xyz` | [float × 3] | Optional | `[-4, -551, 470]` | Home pose of the tool in the world frame; blade vertical, pointing down. |
-| `stopper_y_mm` | float | Optional | `-450` | World Y of the physical box stopper. |
-| `knife_tip_to_table_mm` | float | Optional | `490` | Knife tip height above the table at arm home. |
+| `home_xyz` | [float × 3] | Optional | `[399.97, 0, 406.48]` | Home pose of the tool in the world frame; blade vertical, pointing down. |
+| `stopper_x_mm` | float | Optional | `332` | World X of the physical box stopper, which the box's close edge rests against. |
+| `knife_tip_to_table_mm` | float | Optional | `435` | Knife tip height above the table at arm home. |
 | `base_plate_height_mm` | float | Optional | `20` | Height of the plate the arm is bolted to. |
 
 #### Visual servoing
 
 | Name | Type | Inclusion | Default | Description |
 |---|---|---|---|---|
-| `blade_x_px` | float | Optional | `339` | Pixel column the blade occupies in the camera frame. |
-| `servo_jacobian` | [float × 4] | Optional | `[-1, 0.1, 0.2, -1]` | Image Jacobian `[du/dX, du/dY, dv/dX, dv/dY]`. |
+| `blade_x_px` | float | Optional | `344` | Pixel column the blade occupies in the camera frame. |
+| `servo_jacobian` | [float × 4] | Optional | `[0, 3.2, -3.2, 0]` | Image Jacobian `[du/dX, du/dY, dv/dX, dv/dY]`. |
 | `seam_search_radius_px` | int | Optional | `40` | Ignore seam lines further than this from the blade column. |
 | `converge_tolerance_px` | float | Optional | `2.25` | Pixel error at which a seam counts as converged. |
 | `converge_max_iterations` | int | Optional | `25` | Servo iterations before giving up. |
@@ -91,12 +91,12 @@ The machine must be configured with:
 |---|---|---|---|---|
 | `center_standoff_mm` | float | Optional | `20` | How far above the box top the tool stops on `move_to_center`. |
 | `top_blade_insert_mm` | float | Optional | `25` | Blade insertion depth for the top seam. |
-| `side_blade_insert_mm` | float | Optional | `0` | Blade insertion depth for the side seams. Must not exceed 40 (the close-seam retract). |
-| `top_seam_chunks` | [float] | Optional | `[0.2, 0.2, 0.25]` | Top-seam pass split into these fractions of box height; their sum is the travel per direction. |
-| `side_seam_slice_mm` | float | Optional | `90` | Slice distance along each side seam. |
-| `blade_angle_deg` | float | Optional | `30` | Blade tilt applied before a side cut, and undone after. |
-| `seam_offset_fraction` | float | Optional | `0.45` | Side-seam approach offset, as a fraction of flap width. |
-| `side_seam_z_offset_mm` | float | Optional | `15` | Height above the box top for the side-seam approach. |
+| `side_blade_insert_mm` | float | Optional | `16` | Blade insertion depth for the side seams. The close seam inserts 7 mm deeper than this. Must not exceed 33, so the close-seam insert stays within its 40 mm retract. |
+| `top_seam_chunks` | [float] | Optional | `[0.15, 0.15, 0.25]` | Top-seam pass split into these fractions of box height; their sum is the travel per direction. |
+| `side_seam_slice_mm` | float | Optional | `65` | Slice distance along each side seam. |
+| `blade_angle_deg` | float | Optional | `15` | Blade tilt applied before a side cut, and undone after. |
+| `seam_offset_fraction` | float | Optional | `0.55` | Side-seam approach offset, as a fraction of flap width. |
+| `side_seam_z_offset_mm` | float | Optional | `10` | Height above the box top for the side-seam approach. |
 | `descent_tolerance_mm` | float | Optional | `10` | Linear tolerance for the descent to box center. |
 | `cut_tolerance_mm` | float | Optional | `3` | Linear tolerance for a side-seam slice. |
 | `seam_match_tolerance_mm` | float | Optional | `40` | How close the tool must be to a seam for `cut` to infer it. |
@@ -189,7 +189,7 @@ fields are added.
 - A dry run checks only the targets of the raised path. A real run's targets
   sit up to `dry_run_clearance_mm` plus the insert depth lower
   (`top_blade_insert_mm` on the top seam, `side_blade_insert_mm` on the side
-  seams), and more after `converge`, which settles differently at the real
+  seams, plus 7 mm on the close seam), and more after `converge`, which settles differently at the real
   height. For a passing dry run to mean anything about the real one, set
   `workspace_min_xyz`'s z at least `dry_run_clearance_mm` + the insert depth,
   plus a margin, **above** the lowest height the knife tip may safely reach.
@@ -213,8 +213,9 @@ confirm every move goes the way you expect, then run it for real.
 positioned the arm was also a dry run (`full_cut`, or `move_to_center` /
 `move_to_seam` with `dry_run`). After a real `move_to_center`, a dry-run top
 cut slices at the real `center_standoff_mm` standoff, where a raised flap can
-still be hit. After a real `move_to_seam`, while `side_blade_insert_mm` is
-`0`, a dry-run side cut takes the same path as a real one.
+still be hit. After a real `move_to_seam`, a dry-run side cut slices at the
+real approach height with only the insert skipped, so the blade can still
+touch the box.
 
 ### `set_box`
 

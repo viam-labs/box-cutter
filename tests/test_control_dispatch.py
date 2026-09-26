@@ -9,6 +9,7 @@ from viam.media.video import CameraMimeType
 
 from models.control import (
     BOX_PRESETS,
+    CLOSE_SEAM_EXTRA_INSERT_MM,
     CLOSE_SEAM_RETRACT_MM,
     CUT_SIGN,
     FAR_SEAM_APPROACH_LATERAL_MM,
@@ -623,8 +624,9 @@ async def test_cut_close_seam_retracts_clear():
     ]
     s = ctrl.settings
     moves = ctrl.motion.moves
-    # The close seam inserts 7 mm deeper than configured (see _cut_side_seam).
-    assert moves[0][1].pose.z == pytest.approx(s.side_blade_insert_mm + 7)
+    assert moves[0][1].pose.z == pytest.approx(
+        s.side_blade_insert_mm + CLOSE_SEAM_EXTRA_INSERT_MM
+    )
     assert moves[2][1].pose.z == pytest.approx(-40.0)
     assert moves[3][1].pose.theta == pytest.approx(-s.blade_angle_deg)
     assert moves[4][1].pose.theta == pytest.approx(90.0)
@@ -815,8 +817,11 @@ async def test_dry_run_close_retract_keeps_the_extra_pull_back():
     out = await ctrl.do_command({"command": "cut", "seam": SEAM_CLOSE, "dry_run": True})
     assert out["skipped"] == ["close:insert"]
     slice_move, retract, straighten_blade, straighten_tool = ctrl.motion.moves
-    # The insert was skipped, so only the clearance beyond it is pulled back.
-    assert retract[1].pose.z == pytest.approx(-(CLOSE_SEAM_RETRACT_MM - 16))
+    # The insert (16 mm plus the close seam's extra) was skipped, so only the
+    # clearance beyond it is pulled back.
+    assert retract[1].pose.z == pytest.approx(
+        -(CLOSE_SEAM_RETRACT_MM - 16 - CLOSE_SEAM_EXTRA_INSERT_MM)
+    )
 
 
 @pytest.mark.asyncio
