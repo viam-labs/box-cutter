@@ -596,8 +596,7 @@ async def test_cut_top_slices_both_halves_from_the_center():
 
 @pytest.mark.asyncio
 async def test_cut_far_seam_slices_under_a_linear_constraint():
-    # side_blade_insert_mm defaults to 0 while it is being tuned; set it so the
-    # insert and retract are distinguishable.
+    # Pin the insert rather than rely on the default, which is still being tuned.
     ctrl = await _control_with_box_frame(attrs={"side_blade_insert_mm": 16})
     ctrl.motion.moves.clear()
     out = await ctrl.do_command({"command": "cut", "seam": SEAM_FAR})

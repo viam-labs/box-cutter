@@ -280,3 +280,10 @@ def test_reconfigure_keeps_the_open_robot_client():
     ctrl.robot_client = client
     ctrl.reconfigure(cfg, deps)
     assert ctrl.robot_client is client
+
+
+def test_settings_accepts_side_insert_at_the_close_retract_limit():
+    cfg = _config({
+        "camera": "c", "arm": "a", "tool_frame": "t", "side_blade_insert_mm": 33,
+    })
+    assert Settings.from_config(cfg).side_blade_insert_mm == 33.0

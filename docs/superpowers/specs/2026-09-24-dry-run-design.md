@@ -104,10 +104,9 @@ they would have run:
   `["far:insert", "far:retract"]`.
 - Close seam: the insert only, giving `["close:insert"]`. See below.
 
-While `side_blade_insert_mm` stays at its work-in-progress default of `0`, the
-side-seam insert is already a zero-length move, so skipping it removes nothing.
-A side-seam dry run keeps the blade clear through the raised approach height
-alone (see Raised standoffs).
+The side-seam insert is `side_blade_insert_mm` (default 16), plus
+`CLOSE_SEAM_EXTRA_INSERT_MM` (7) on the close seam. Updated 2026-09-26: when
+this spec was written the default was a work-in-progress `0`.
 
 Insert and retract are skipped as a pair so the tool does not creep upward by
 the insert depth on every pass.
@@ -117,7 +116,8 @@ the insert depth on every pass.
 In a real run, the close seam retracts `CLOSE_SEAM_RETRACT_MM` (40 mm), which
 is more than it inserted, to pull clear of the box before the tool turns. In a
 dry run the insert is skipped, and the retract becomes
-`-(CLOSE_SEAM_RETRACT_MM - side_blade_insert_mm)`. The tool ends up the same
+`-(CLOSE_SEAM_RETRACT_MM - side_blade_insert_mm - CLOSE_SEAM_EXTRA_INSERT_MM)`,
+that is, the retract less the close seam's actual insert. The tool ends up the same
 distance above its approach height as in a real run. The dry-run approach is
 itself `dry_run_clearance_mm` higher, so the tool turns that much higher than in
 a real run, which only adds margin. The retract goes through the gate as a
@@ -147,8 +147,7 @@ position through a dry-run move: `full_cut` with `dry_run`, or `move_to_center`
   at the real 20 mm standoff. There is no insert, but a flap sticking up could
   still be hit.
 - A dry-run side-seam `cut` right after a real `move_to_seam` slices at the
-  real approach height. With `side_blade_insert_mm` at `0`, that is the same
-  path a real cut takes: contact is possible.
+  real approach height with only the insert skipped: contact is possible.
 
 The model doc will say both.
 
@@ -171,9 +170,8 @@ Added to `tests/test_control_dispatch.py`, using the fakes it already has
 2. A dry-run top-seam `cut` sends no z inserts or retracts, and returns
    `skipped == ["top:insert", "top:retract", "top:insert", "top:retract"]`.
 3. In a dry run with `side_blade_insert_mm: 16`, the close-seam retract is
-   `-24`. The test needs a nonzero insert: at the default of `0`, the dry-run
-   and real retracts are both `-40`, and the test would pass without the
-   adjustment.
+   `-17` (40 less the 23 mm close insert). The test sets the insert explicitly
+   so it doesn't depend on the default.
 4. A dry-run `full_cut` returns
    `skipped == ["top:insert", "top:retract", "top:insert", "top:retract",
    "far:insert", "far:retract", "close:insert"]`.

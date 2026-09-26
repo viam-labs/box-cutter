@@ -189,10 +189,11 @@ fields are added.
 - A dry run checks only the targets of the raised path. A real run's targets
   sit up to `dry_run_clearance_mm` plus the insert depth lower
   (`top_blade_insert_mm` on the top seam, `side_blade_insert_mm` on the side
-  seams, plus 7 mm on the close seam), and more after `converge`, which settles differently at the real
-  height. For a passing dry run to mean anything about the real one, set
-  `workspace_min_xyz`'s z at least `dry_run_clearance_mm` + the insert depth,
-  plus a margin, **above** the lowest height the knife tip may safely reach.
+  seams, plus 7 mm on the close seam), and more after `converge`, which
+  settles differently at the real height. For a passing dry run to mean
+  anything about the real one, set `workspace_min_xyz`'s z at least
+  `dry_run_clearance_mm` + the deepest insert depth, plus a margin, **above**
+  the lowest height the knife tip may safely reach.
 - Without `workspace_min_xyz`/`workspace_max_xyz` configured, the dry run
   still runs, logs a warning, and returns `"bounds_checked": false`.
 - The per-move bounds check costs one extra `transform_pose` call, and only
