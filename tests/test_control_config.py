@@ -20,17 +20,23 @@ def test_validate_config_requires_camera_arm_tool():
 
 
 def test_validate_config_returns_required_deps():
-    cfg = _config({"camera": "realsense-cam", "arm": "xarm", "tool_frame": "stylus-tool"})
+    cfg = _config(
+        {"camera": "realsense-cam", "arm": "xarm", "tool_frame": "stylus-tool"}
+    )
     required, optional = Control.validate_config(cfg)
     assert set(required) == {"realsense-cam", "xarm", "builtin"}
     assert optional == []
 
 
 def test_validate_config_includes_named_motion_service_dep():
-    cfg = _config({
-        "camera": "realsense-cam", "arm": "xarm", "tool_frame": "stylus-tool",
-        "motion_service": "builtin",
-    })
+    cfg = _config(
+        {
+            "camera": "realsense-cam",
+            "arm": "xarm",
+            "tool_frame": "stylus-tool",
+            "motion_service": "builtin",
+        }
+    )
     required, _ = Control.validate_config(cfg)
     assert "builtin" in required
 
@@ -67,11 +73,17 @@ def test_settings_defaults_carry_the_servo_tuning():
 
 
 def test_settings_overrides_ground_truth_and_home():
-    cfg = _config({
-        "camera": "c", "arm": "a", "tool_frame": "t",
-        "stopper_y_mm": -500, "knife_tip_to_table_mm": 505,
-        "base_plate_height_mm": 25, "home_xyz": [0, -600, 500],
-    })
+    cfg = _config(
+        {
+            "camera": "c",
+            "arm": "a",
+            "tool_frame": "t",
+            "stopper_y_mm": -500,
+            "knife_tip_to_table_mm": 505,
+            "base_plate_height_mm": 25,
+            "home_xyz": [0, -600, 500],
+        }
+    )
     s = Settings.from_config(cfg)
     assert s.stopper_y_mm == -500
     assert s.knife_tip_to_table_mm == 505
@@ -94,17 +106,27 @@ def test_settings_rejects_wrong_length_home_xyz():
 
 
 def test_settings_rejects_wrong_length_jacobian():
-    cfg = _config({
-        "camera": "c", "arm": "a", "tool_frame": "t", "servo_jacobian": [1, 2, 3],
-    })
+    cfg = _config(
+        {
+            "camera": "c",
+            "arm": "a",
+            "tool_frame": "t",
+            "servo_jacobian": [1, 2, 3],
+        }
+    )
     with pytest.raises(ValueError, match="exactly 4"):
         Settings.from_config(cfg)
 
 
 def test_settings_rejects_empty_top_seam_chunks():
-    cfg = _config({
-        "camera": "c", "arm": "a", "tool_frame": "t", "top_seam_chunks": [],
-    })
+    cfg = _config(
+        {
+            "camera": "c",
+            "arm": "a",
+            "tool_frame": "t",
+            "top_seam_chunks": [],
+        }
+    )
     with pytest.raises(ValueError, match="must not be empty"):
         Settings.from_config(cfg)
 
@@ -114,9 +136,14 @@ def test_top_seam_span_is_the_sum_of_its_chunks():
     assert s.top_seam_chunks == (0.2, 0.2, 0.25)
     assert s.top_seam_span_fraction == pytest.approx(0.65)
 
-    cfg = _config({
-        "camera": "c", "arm": "a", "tool_frame": "t", "top_seam_chunks": [0.5, 0.25],
-    })
+    cfg = _config(
+        {
+            "camera": "c",
+            "arm": "a",
+            "tool_frame": "t",
+            "top_seam_chunks": [0.5, 0.25],
+        }
+    )
     assert Settings.from_config(cfg).top_seam_span_fraction == pytest.approx(0.75)
 
 
@@ -128,12 +155,20 @@ def test_gain_for_selects_the_per_seam_gain():
 
 
 def test_settings_from_config_overrides_tuning():
-    cfg = _config({
-        "camera": "cam", "arm": "arm", "tool_frame": "tool",
-        "camera_frame": "cam-frame", "world_frame": "map",
-        "min_box_area": 1234, "inset_mm": 3, "center_standoff_mm": 7,
-        "hsv_lower": [1, 2, 3], "hsv_upper": [4, 5, 6],
-    })
+    cfg = _config(
+        {
+            "camera": "cam",
+            "arm": "arm",
+            "tool_frame": "tool",
+            "camera_frame": "cam-frame",
+            "world_frame": "map",
+            "min_box_area": 1234,
+            "inset_mm": 3,
+            "center_standoff_mm": 7,
+            "hsv_lower": [1, 2, 3],
+            "hsv_upper": [4, 5, 6],
+        }
+    )
     s = Settings.from_config(cfg)
     assert s.camera_frame == "cam-frame"
     assert s.world_frame == "map"

@@ -1,16 +1,17 @@
-import numpy as np
 import cv2
+import numpy as np
 import pytest
 from google.protobuf.struct_pb2 import Struct
+from viam.media.video import CameraMimeType
 from viam.proto.app.robot import ComponentConfig
 from viam.proto.common import Pose, PoseInFrame
-from viam.media.video import CameraMimeType
 
-from models.control import Control, Settings, SEAM_CLOSE, SEAM_FAR, SEAM_TOP
+from models.control import SEAM_CLOSE, SEAM_FAR, SEAM_TOP, Control, Settings
 
 
 def _config(attrs):
-    s = Struct(); s.update(attrs)
+    s = Struct()
+    s.update(attrs)
     return ComponentConfig(attributes=s)
 
 
@@ -30,6 +31,7 @@ class _NamedImage:
         self.mime_type = mime_type
         self.data = data
         self._depth = depth
+
     def bytes_to_depth_array(self):
         return self._depth
 
@@ -37,8 +39,10 @@ class _NamedImage:
 class _FakeCamera:
     def __init__(self, images):
         self._images = images
+
     async def get_images(self):
         return self._images, None
+
     async def get_properties(self):
         return _Props()
 
@@ -49,6 +53,7 @@ class _FakeRobotClient:
     `world` passes the camera-frame point through unchanged; the tool frame is
     offset so tests can tell the two apart.
     """
+
     TOOL_OFFSET = (1.0, 2.0, 3.0)
 
     def __init__(self):
@@ -73,6 +78,7 @@ class _FakeRobotClient:
 
 class _RecordingMotion:
     """Records every move; reports the tool parked wherever `pose` says."""
+
     def __init__(self, tool_y=0.0):
         self.moves = []
         self.tool_y = tool_y
@@ -94,8 +100,8 @@ class _RecordingMotion:
 
 def _images_with_box():
     bgr = np.full((480, 640, 3), 128, dtype=np.uint8)
-    bgr[140:340, 240:400] = (60, 140, 200)   # tan box, center ~ (320, 240)
-    bgr[140:340, 316:324] = (10, 10, 10)      # dark seam
+    bgr[140:340, 240:400] = (60, 140, 200)  # tan box, center ~ (320, 240)
+    bgr[140:340, 316:324] = (10, 10, 10)  # dark seam
     ok, buf = cv2.imencode(".jpg", bgr)
     depth = np.full((480, 640), 700, dtype=np.uint16)
     return [
@@ -129,6 +135,7 @@ def _make_control(attrs=None, motion=None):
 
 
 # --- find_center --------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_find_center_returns_world_pose():
@@ -179,10 +186,12 @@ async def test_find_center_raises_on_depth_color_mismatch():
     bgr = np.full((480, 640, 3), 128, dtype=np.uint8)
     ok, buf = cv2.imencode(".jpg", bgr)
     depth = np.full((240, 320), 700, dtype=np.uint16)  # mismatched resolution
-    ctrl.camera = _FakeCamera([
-        _NamedImage(CameraMimeType.JPEG, data=buf.tobytes()),
-        _NamedImage(CameraMimeType.VIAM_RAW_DEPTH, depth=depth),
-    ])
+    ctrl.camera = _FakeCamera(
+        [
+            _NamedImage(CameraMimeType.JPEG, data=buf.tobytes()),
+            _NamedImage(CameraMimeType.VIAM_RAW_DEPTH, depth=depth),
+        ]
+    )
     with pytest.raises(ValueError, match="not aligned"):
         await ctrl.do_command({"command": "find_center"})
 
@@ -213,6 +222,7 @@ async def test_find_center_raises_without_intrinsics():
 
 # --- dispatch -----------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_do_command_unknown_raises():
     ctrl = _make_control()
@@ -236,14 +246,24 @@ async def test_do_command_rejects_unknown_seam():
 
 # --- set_box ------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_set_box_stores_explicit_measurements():
     ctrl = _make_control()
-    out = await ctrl.do_command({
-        "command": "set_box", "depth_mm": 535, "u": 380, "v": 242, "flap_width_mm": 120,
-    })
+    out = await ctrl.do_command(
+        {
+            "command": "set_box",
+            "depth_mm": 535,
+            "u": 380,
+            "v": 242,
+            "flap_width_mm": 120,
+        }
+    )
     assert out["box"] == {
-        "depth_mm": 535.0, "u": 380, "v": 242, "flap_width_mm": 120.0,
+        "depth_mm": 535.0,
+        "u": 380,
+        "v": 242,
+        "flap_width_mm": 120.0,
     }
 
 
@@ -273,17 +293,29 @@ async def test_set_box_rejects_partial_measurements():
 async def test_set_box_rejects_nonpositive_values():
     ctrl = _make_control()
     with pytest.raises(ValueError, match="must be positive"):
-        await ctrl.do_command({
-            "command": "set_box", "depth_mm": 0, "u": 1, "v": 2, "flap_width_mm": 10,
-        })
+        await ctrl.do_command(
+            {
+                "command": "set_box",
+                "depth_mm": 0,
+                "u": 1,
+                "v": 2,
+                "flap_width_mm": 10,
+            }
+        )
 
 
 @pytest.mark.asyncio
 async def test_set_box_override_replaces_detected_center():
     ctrl = _make_control()
-    await ctrl.do_command({
-        "command": "set_box", "depth_mm": 535, "u": 380, "v": 242, "flap_width_mm": 120,
-    })
+    await ctrl.do_command(
+        {
+            "command": "set_box",
+            "depth_mm": 535,
+            "u": 380,
+            "v": 242,
+            "flap_width_mm": 120,
+        }
+    )
     out = await ctrl.do_command({"command": "find_center"})
     assert out["override_applied"] is True
     assert (out["u"], out["v"]) == (380, 242)
@@ -313,6 +345,7 @@ async def test_set_box_invalidates_the_stored_box_frame():
 
 # --- home / move_to_center ----------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_home_moves_tool_to_configured_pose():
     ctrl = _make_control()
@@ -334,7 +367,9 @@ async def test_move_to_center_descends_in_the_tool_frame():
     assert comp == "tool"
     assert dest.reference_frame == "tool"
     # Stops short of the box top by center_standoff_mm.
-    expected_z = out["box_frame"]["knife_tip_to_top_mm"] - ctrl.settings.center_standoff_mm
+    expected_z = (
+        out["box_frame"]["knife_tip_to_top_mm"] - ctrl.settings.center_standoff_mm
+    )
     assert dest.pose.z == pytest.approx(expected_z)
     assert constraints is not None
 
@@ -350,10 +385,11 @@ async def test_move_to_center_skips_move_when_not_found():
 
 # --- converge -----------------------------------------------------------------
 
+
 def _frame_with_seam_at(x):
     """Camera frame whose only vertical line sits at pixel column x."""
     bgr = np.full((480, 640, 3), 200, dtype=np.uint8)
-    bgr[100:400, x - 1:x + 2] = 20
+    bgr[100:400, x - 1 : x + 2] = 20
     ok, buf = cv2.imencode(".png", bgr)
     depth = np.full((480, 640), 700, dtype=np.uint16)
     return [
@@ -364,6 +400,7 @@ def _frame_with_seam_at(x):
 
 class _ServoCamera:
     """Box frames first, then seam frames that walk toward the blade column."""
+
     def __init__(self, seam_columns):
         self._seam_columns = list(seam_columns)
         self._index = 0
@@ -509,6 +546,7 @@ async def test_converge_refuses_a_side_seam_without_blade_frame():
 
 # --- cut ----------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_cut_requires_a_box_frame():
     ctrl = _make_control()
@@ -524,9 +562,17 @@ async def test_cut_top_slices_both_halves_from_the_center():
     out = await ctrl.do_command({"command": "cut", "seam": SEAM_TOP})
     assert out["completed"] is True
     assert out["steps"] == [
-        "insert", "slice_forward", "slice_forward", "slice_forward", "retract",
+        "insert",
+        "slice_forward",
+        "slice_forward",
+        "slice_forward",
+        "retract",
         "return_to_center",
-        "insert", "slice_back", "slice_back", "slice_back", "retract",
+        "insert",
+        "slice_back",
+        "slice_back",
+        "slice_back",
+        "retract",
     ]
 
     s, box = ctrl.settings, ctrl._box_frame
@@ -570,7 +616,11 @@ async def test_cut_close_seam_digs_deeper_and_retracts_clear():
     ctrl.motion.moves.clear()
     out = await ctrl.do_command({"command": "cut", "seam": SEAM_CLOSE})
     assert out["steps"] == [
-        "insert", "slice", "retract", "straighten_blade", "straighten_tool",
+        "insert",
+        "slice",
+        "retract",
+        "straighten_blade",
+        "straighten_tool",
     ]
     s = ctrl.settings
     moves = ctrl.motion.moves
@@ -581,6 +631,7 @@ async def test_cut_close_seam_digs_deeper_and_retracts_clear():
 
 
 # --- seam resolution from pose -------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_cut_infers_the_top_seam_from_the_tool_pose():
@@ -638,8 +689,10 @@ async def test_cut_refuses_when_two_seams_are_equally_close():
 
 # --- full_cut -----------------------------------------------------------------
 
+
 class _FullCutCamera:
     """A box frame for the one detection, then an already-aligned seam."""
+
     def __init__(self):
         self._first = True
 
@@ -661,10 +714,14 @@ async def test_full_cut_runs_home_center_and_all_three_seams():
     out = await ctrl.do_command({"command": "full_cut"})
     assert out["completed"] is True
     assert out["steps"] == [
-        "home", "move_to_center",
-        "converge_top", "cut_top",
-        "converge_far", "cut_far",
-        "converge_close", "cut_close",
+        "home",
+        "move_to_center",
+        "converge_top",
+        "cut_top",
+        "converge_far",
+        "cut_far",
+        "converge_close",
+        "cut_close",
         "home",
     ]
     assert [s["seam"] for s in out["seams"]] == [SEAM_TOP, SEAM_FAR, SEAM_CLOSE]
