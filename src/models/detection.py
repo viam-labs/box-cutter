@@ -230,8 +230,12 @@ def find_vertical_seam_line(
         distance = abs(blade_x_px - center_x)
         if dx < vertical_dx_ratio * dy and 0 < distance < search_radius_px:
             candidates.append(
-                (distance, center_x, 0.5 * (int(y1) + int(y2)),
-                 (int(x1), int(y1), int(x2), int(y2)))
+                (
+                    distance,
+                    center_x,
+                    0.5 * (int(y1) + int(y2)),
+                    (int(x1), int(y1), int(x2), int(y2)),
+                )
             )
     if not candidates:
         return None

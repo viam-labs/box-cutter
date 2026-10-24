@@ -51,7 +51,7 @@ FAR_SEAM_APPROACH_LATERAL_MM = 5.0  # lateral nudge only the far approach uses
 # Which way along tool x the blade travels when slicing.
 CUT_SIGN = -1.0
 CLOSE_SEAM_FINAL_THETA_DEG = 90.0  # unwinds the tool after the last cut
-SIDE_SEAM_THETA_DEG = -90.0       # tool yaw for both side-seam approaches
+SIDE_SEAM_THETA_DEG = -90.0  # tool yaw for both side-seam approaches
 
 # Two seam candidates closer together than this cannot be told apart from the
 # tool pose alone, so `cut` refuses rather than guessing which one it is on.
@@ -60,7 +60,6 @@ SEAM_AMBIGUITY_MM = 5.0
 # `jog` is driven by hand with a blade mounted, so a fat-fingered 50 where 5 was
 # meant should be refused rather than executed.
 JOG_MAX_MM = 50.0
-
 
 
 # (depth_mm, u, v, flap_width_mm, box_height_mm) -- see `set_box`.
@@ -191,12 +190,12 @@ class BoxData:
     that positioned the tool).
     """
 
-    center_x_mm: float          # box center, world frame
+    center_x_mm: float  # box center, world frame
     center_y_mm: float
     center_z_mm: float
-    height_mm: float            # how tall the box reads in the camera FOV
+    height_mm: float  # how tall the box reads in the camera FOV
     knife_tip_to_top_mm: float  # tool-frame z of the box top
-    tool_x_mm: float            # box center expressed in the tool frame
+    tool_x_mm: float  # box center expressed in the tool frame
     tool_y_mm: float
     flap_width_mm: Optional[float]  # center-to-side; only an operator knows it
 
@@ -231,7 +230,7 @@ class Settings:
 
     # Measured ground truth for this cell.
     stopper_x_mm: float
-    knife_tip_to_table_mm:float
+    knife_tip_to_table_mm: float
     base_plate_height_mm: float
     home_xyz: Tuple[float, ...]
     center_standoff_mm: float
@@ -543,7 +542,9 @@ class Control(Generic, EasyResource):
 
         override = self._box_override
         if not override:
-            raise ValueError("Currently only supporting manual setting. Run set_box first.")
+            raise ValueError(
+                "Currently only supporting manual setting. Run set_box first."
+            )
 
         flap_width_mm = None
         height_mm: Optional[float] = None
@@ -664,7 +665,6 @@ class Control(Generic, EasyResource):
         # await self.motion.move(component_name=s.tool_frame, destination=self._tool_pose(x=0, y=0, z=-tool_change_descent), constraints=tool_change_constraint)
         return
 
-
     async def move_to_center(self) -> Mapping[str, ValueTypes]:
         """Run find_center, then descend to a standoff above the box top.
 
@@ -679,9 +679,9 @@ class Control(Generic, EasyResource):
         await self.motion.move(
             component_name=s.tool_frame,
             destination=self._tool_pose(
-                x=box.tool_x_mm, # 383
-                y=box.tool_y_mm, # -3
-                z=box.knife_tip_to_top_mm - s.center_standoff_mm, # 285 - 20 = 265
+                x=box.tool_x_mm,  # 383
+                y=box.tool_y_mm,  # -3
+                z=box.knife_tip_to_top_mm - s.center_standoff_mm,  # 285 - 20 = 265
             ),
             constraints=Constraints(
                 linear_constraint=[
@@ -845,8 +845,7 @@ class Control(Generic, EasyResource):
             f"seam still {error_px:.1f}px from the blade after "
             f"converge_max_iterations={s.converge_max_iterations}"
             if error_px is not None
-            else f"gave up after converge_max_iterations="
-            f"{s.converge_max_iterations}",
+            else f"gave up after converge_max_iterations={s.converge_max_iterations}",
             error_px=error_px,
         )
 

@@ -9,6 +9,7 @@ from models.detection import deproject
 
 class _Intr:
     """Minimal stand-in for viam intrinsic_parameters."""
+
     def __init__(self, fx, fy, cx, cy):
         self.focal_x_px = fx
         self.focal_y_px = fy
@@ -74,6 +75,7 @@ from models.detection import decode_color_and_depth
 
 class _FakeNamedImage:
     """Enough of NamedImage for decode_color_and_depth."""
+
     def __init__(self, mime_type, data=b"", depth=None):
         self.mime_type = mime_type
         self.data = data
@@ -124,7 +126,7 @@ def _tan_box_image(w=640, h=480, box=(220, 160, 200, 160)):
     """Neutral-gray background with one solid tan (HSV ~20,150,200) rectangle."""
     bgr = np.full((h, w, 3), 128, dtype=np.uint8)
     x, y, bw, bh = box
-    bgr[y:y + bh, x:x + bw] = (60, 140, 200)  # BGR
+    bgr[y : y + bh, x : x + bw] = (60, 140, 200)  # BGR
     return bgr, (x + bw // 2, y + bh // 2)
 
 
@@ -156,8 +158,8 @@ from models.detection import find_seam_edges
 def test_find_seam_edges_returns_endpoints_along_dark_seam():
     h, w = 480, 640
     bgr = np.full((h, w, 3), 128, dtype=np.uint8)
-    bgr[140:340, 240:400] = (60, 140, 200)     # tan box
-    bgr[140:340, 316:324] = (10, 10, 10)        # dark vertical seam
+    bgr[140:340, 240:400] = (60, 140, 200)  # tan box
+    bgr[140:340, 316:324] = (10, 10, 10)  # dark vertical seam
     _, _, mask = detect_box_center(bgr)
     assert mask is not None
     center = (320, 240)
@@ -180,7 +182,7 @@ def test_find_seam_edges_falls_back_to_longer_axis_without_dark_seam():
     bgr = np.full((h, w, 3), 128, dtype=np.uint8)
     # Plain tan rectangle, no dark seam: 240 wide x 120 tall (clearly non-square).
     x0, y0, bw, bh = 200, 180, 240, 120
-    bgr[y0:y0 + bh, x0:x0 + bw] = (60, 140, 200)
+    bgr[y0 : y0 + bh, x0 : x0 + bw] = (60, 140, 200)
     _, _, mask = detect_box_center(bgr)
     assert mask is not None
     center = (x0 + bw // 2, y0 + bh // 2)
@@ -205,7 +207,7 @@ def _frame_with_vertical_lines(*x_positions, height=(100, 400)):
     bgr = np.full((480, 640, 3), 200, dtype=np.uint8)
     top, bottom = height
     for x in x_positions:
-        bgr[top:bottom, x - 1:x + 2] = 20
+        bgr[top:bottom, x - 1 : x + 2] = 20
     return bgr
 
 

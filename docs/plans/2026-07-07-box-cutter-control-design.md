@@ -26,7 +26,7 @@ camera frame, then ask the motion service for its pose in the destination frame.
 t = Transform(
     reference_frame="box_point",
     pose_in_observer_frame=PoseInFrame(
-        reference_frame=camera_frame,     # e.g. "realsense-cam"
+        reference_frame=camera_frame,  # e.g. "realsense-cam"
         pose=Pose(x=x, y=y, z=z, o_z=1),
     ),
 )

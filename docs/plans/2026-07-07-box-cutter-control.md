@@ -101,6 +101,7 @@ from models.detection import deproject
 
 class _Intr:
     """Minimal stand-in for viam intrinsic_parameters."""
+
     def __init__(self, fx, fy, cx, cy):
         self.focal_x_px = fx
         self.focal_y_px = fy
@@ -313,6 +314,7 @@ from models.detection import decode_color_and_depth
 
 class _FakeNamedImage:
     """Enough of NamedImage for decode_color_and_depth."""
+
     def __init__(self, mime_type, data=b"", depth=None):
         self.mime_type = mime_type
         self.data = data
@@ -413,7 +415,7 @@ def _tan_box_image(w=640, h=480, box=(220, 160, 200, 160)):
     bgr = np.full((h, w, 3), 128, dtype=np.uint8)  # neutral gray
     x, y, bw, bh = box
     # A tan/orange BGR that lands inside HSV_LOWER..HSV_UPPER.
-    bgr[y:y + bh, x:x + bw] = (60, 140, 200)  # BGR
+    bgr[y : y + bh, x : x + bw] = (60, 140, 200)  # BGR
     return bgr, (x + bw // 2, y + bh // 2)
 
 
@@ -463,7 +465,7 @@ def detect_box_center(
     mask = cv2.inRange(hsv, np.array(hsv_lower), np.array(hsv_upper))
 
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)   # kill specks
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)  # kill specks
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=4)  # bridge seam
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -518,8 +520,8 @@ def test_find_seam_edges_returns_endpoints_along_dark_seam():
     # Tan box with a vertical dark seam down the middle.
     h, w = 480, 640
     bgr = np.full((h, w, 3), 128, dtype=np.uint8)
-    bgr[140:340, 240:400] = (60, 140, 200)     # tan box
-    bgr[140:340, 316:324] = (10, 10, 10)        # dark vertical seam
+    bgr[140:340, 240:400] = (60, 140, 200)  # tan box
+    bgr[140:340, 316:324] = (10, 10, 10)  # dark vertical seam
     _, _, mask = detect_box_center(bgr)
     assert mask is not None
     center = (320, 240)
@@ -650,17 +652,23 @@ def test_validate_config_requires_camera_arm_tool():
 
 
 def test_validate_config_returns_required_deps():
-    cfg = _config({"camera": "realsense-cam", "arm": "xarm", "tool_frame": "stylus-tool"})
+    cfg = _config(
+        {"camera": "realsense-cam", "arm": "xarm", "tool_frame": "stylus-tool"}
+    )
     required, optional = Control.validate_config(cfg)
     assert set(required) == {"realsense-cam", "xarm"}
     assert optional == []
 
 
 def test_validate_config_includes_named_motion_service_dep():
-    cfg = _config({
-        "camera": "realsense-cam", "arm": "xarm", "tool_frame": "stylus-tool",
-        "motion_service": "builtin",
-    })
+    cfg = _config(
+        {
+            "camera": "realsense-cam",
+            "arm": "xarm",
+            "tool_frame": "stylus-tool",
+            "motion_service": "builtin",
+        }
+    )
     required, _ = Control.validate_config(cfg)
     assert "builtin" in required
 
@@ -670,22 +678,30 @@ def test_settings_from_config_defaults():
     s = Settings.from_config(cfg)
     assert s.camera_name == "cam"
     assert s.arm_name == "arm"
-    assert s.motion_name == "builtin"        # default
-    assert s.camera_frame == "cam"           # defaults to camera name
-    assert s.world_frame == "world"          # default
+    assert s.motion_name == "builtin"  # default
+    assert s.camera_frame == "cam"  # defaults to camera name
+    assert s.world_frame == "world"  # default
     assert s.tool_frame == "tool"
-    assert s.min_box_area == 5000            # default tuning
+    assert s.min_box_area == 5000  # default tuning
     assert s.plunge_depth_mm == 4
     assert s.hsv_lower == (10, 60, 80)
 
 
 def test_settings_from_config_overrides_tuning():
-    cfg = _config({
-        "camera": "cam", "arm": "arm", "tool_frame": "tool",
-        "camera_frame": "cam-frame", "world_frame": "map",
-        "min_box_area": 1234, "inset_mm": 3, "plunge_depth_mm": 7,
-        "hsv_lower": [1, 2, 3], "hsv_upper": [4, 5, 6],
-    })
+    cfg = _config(
+        {
+            "camera": "cam",
+            "arm": "arm",
+            "tool_frame": "tool",
+            "camera_frame": "cam-frame",
+            "world_frame": "map",
+            "min_box_area": 1234,
+            "inset_mm": 3,
+            "plunge_depth_mm": 7,
+            "hsv_lower": [1, 2, 3],
+            "hsv_upper": [4, 5, 6],
+        }
+    )
     s = Settings.from_config(cfg)
     assert s.camera_frame == "cam-frame"
     assert s.world_frame == "map"
@@ -725,7 +741,9 @@ from viam.services.motion import MotionClient
 from viam.utils import ValueTypes
 
 
-def _str(config: ComponentConfig, key: str, default: Optional[str] = None) -> Optional[str]:
+def _str(
+    config: ComponentConfig, key: str, default: Optional[str] = None
+) -> Optional[str]:
     fields = config.attributes.fields
     if key in fields and fields[key].string_value:
         return fields[key].string_value
@@ -739,7 +757,9 @@ def _num(config: ComponentConfig, key: str, default):
     return default
 
 
-def _triple(config: ComponentConfig, key: str, default: Tuple[int, int, int]) -> Tuple[int, int, int]:
+def _triple(
+    config: ComponentConfig, key: str, default: Tuple[int, int, int]
+) -> Tuple[int, int, int]:
     fields = config.attributes.fields
     if key in fields and fields[key].HasField("list_value"):
         vals = [int(v.number_value) for v in fields[key].list_value.values]
@@ -827,8 +847,11 @@ class Control(Generic, EasyResource):
         self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
     ) -> None:
         self.settings = Settings.from_config(config)
-        self.camera = Camera.from_robot_dependencies(dependencies, self.settings.camera_name) \
-            if hasattr(Camera, "from_robot_dependencies") else None
+        self.camera = (
+            Camera.from_robot_dependencies(dependencies, self.settings.camera_name)
+            if hasattr(Camera, "from_robot_dependencies")
+            else None
+        )
         # Dependency resolution is finalized in Task 8; store raw deps for now.
         self._dependencies = dependencies
 
@@ -917,27 +940,26 @@ Expected: FAIL — `Control` has no `_resolve`.
 **Step 3: Replace the `reconfigure` method and add `_resolve`**
 
 ```python
-    @staticmethod
-    def _resolve(dependencies: Mapping[ResourceName, ResourceBase], name: ResourceName):
-        resource = dependencies.get(name)
-        if resource is None:
-            raise ValueError(f"missing required dependency: {name.name}")
-        return resource
+@staticmethod
+def _resolve(dependencies: Mapping[ResourceName, ResourceBase], name: ResourceName):
+    resource = dependencies.get(name)
+    if resource is None:
+        raise ValueError(f"missing required dependency: {name.name}")
+    return resource
 
-    def reconfigure(
-        self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
-    ) -> None:
-        settings = Settings.from_config(config)
-        self.settings = settings
-        self.camera = self._resolve(
-            dependencies, Camera.get_resource_name(settings.camera_name)
-        )
-        self.arm = self._resolve(
-            dependencies, Arm.get_resource_name(settings.arm_name)
-        )
-        self.motion = self._resolve(
-            dependencies, MotionClient.get_resource_name(settings.motion_name)
-        )
+
+def reconfigure(
+    self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
+) -> None:
+    settings = Settings.from_config(config)
+    self.settings = settings
+    self.camera = self._resolve(
+        dependencies, Camera.get_resource_name(settings.camera_name)
+    )
+    self.arm = self._resolve(dependencies, Arm.get_resource_name(settings.arm_name))
+    self.motion = self._resolve(
+        dependencies, MotionClient.get_resource_name(settings.motion_name)
+    )
 ```
 
 Remove the placeholder `self.camera = Camera.from_robot_dependencies(...)` block and
@@ -1013,7 +1035,8 @@ from models.control import Control, Settings
 
 
 def _config(attrs):
-    s = Struct(); s.update(attrs)
+    s = Struct()
+    s.update(attrs)
     return ComponentConfig(attributes=s)
 
 
@@ -1033,6 +1056,7 @@ class _NamedImage:
         self.mime_type = mime_type
         self.data = data
         self._depth = depth
+
     def bytes_to_depth_array(self):
         return self._depth
 
@@ -1040,14 +1064,18 @@ class _NamedImage:
 class _FakeCamera:
     def __init__(self, images):
         self._images = images
+
     async def get_images(self):
         return self._images, None
+
     async def get_properties(self):
         return _Props()
 
 
 class _FakeMotion:
-    async def get_pose(self, component_name, destination_frame, supplemental_transforms=None, **kw):
+    async def get_pose(
+        self, component_name, destination_frame, supplemental_transforms=None, **kw
+    ):
         # Echo the injected camera-frame point back as if it were world coords.
         t = supplemental_transforms[0].pose_in_observer_frame.pose
         return PoseInFrame(
@@ -1058,8 +1086,8 @@ class _FakeMotion:
 
 def _images_with_box():
     bgr = np.full((480, 640, 3), 128, dtype=np.uint8)
-    bgr[140:340, 240:400] = (60, 140, 200)   # tan box, center ~ (320, 240)
-    bgr[140:340, 316:324] = (10, 10, 10)      # dark seam
+    bgr[140:340, 240:400] = (60, 140, 200)  # tan box, center ~ (320, 240)
+    bgr[140:340, 316:324] = (10, 10, 10)  # dark seam
     ok, buf = cv2.imencode(".jpg", bgr)
     depth = np.full((480, 640), 700, dtype=np.uint16)
     return [
@@ -1100,10 +1128,12 @@ async def test_find_center_reports_not_found_on_blank_frame():
     blank = np.full((480, 640, 3), 128, dtype=np.uint8)
     ok, buf = cv2.imencode(".jpg", blank)
     depth = np.full((480, 640), 700, dtype=np.uint16)
-    ctrl.camera = _FakeCamera([
-        _NamedImage(CameraMimeType.JPEG, data=buf.tobytes()),
-        _NamedImage(CameraMimeType.VIAM_RAW_DEPTH, depth=depth),
-    ])
+    ctrl.camera = _FakeCamera(
+        [
+            _NamedImage(CameraMimeType.JPEG, data=buf.tobytes()),
+            _NamedImage(CameraMimeType.VIAM_RAW_DEPTH, depth=depth),
+        ]
+    )
     out = await ctrl.do_command({"command": "find_center"})
     assert out["found"] is False
     assert "reason" in out
@@ -1161,94 +1191,99 @@ from models.detection import (
 Replace `do_command` and add the action methods:
 
 ```python
-    async def do_command(
-        self,
-        command: Mapping[str, ValueTypes],
-        *,
-        timeout: Optional[float] = None,
-        **kwargs,
-    ) -> Mapping[str, ValueTypes]:
-        name = command.get("command")
-        if not name:
-            raise ValueError("do_command requires a 'command' key")
-        if name == "find_center":
-            return await self.find_center()
-        if name == "move_to_center":
-            return await self.move_to_center()
-        if name == "full_cut":
-            return await self.full_cut()
-        raise ValueError(f"unknown command: {name!r}")
+async def do_command(
+    self,
+    command: Mapping[str, ValueTypes],
+    *,
+    timeout: Optional[float] = None,
+    **kwargs,
+) -> Mapping[str, ValueTypes]:
+    name = command.get("command")
+    if not name:
+        raise ValueError("do_command requires a 'command' key")
+    if name == "find_center":
+        return await self.find_center()
+    if name == "move_to_center":
+        return await self.move_to_center()
+    if name == "full_cut":
+        return await self.full_cut()
+    raise ValueError(f"unknown command: {name!r}")
 
-    async def find_center(self) -> Mapping[str, ValueTypes]:
-        s = self.settings
-        images, _ = await self.camera.get_images()
-        properties = await self.camera.get_properties()
-        intr = properties.intrinsic_parameters
 
-        color_bgr, depth_np = decode_color_and_depth(images)
-        if depth_np.shape[:2] != color_bgr.shape[:2]:
-            raise ValueError(
-                f"depth {depth_np.shape[:2]} not aligned to color "
-                f"{color_bgr.shape[:2]}; cannot deproject with color intrinsics"
-            )
+async def find_center(self) -> Mapping[str, ValueTypes]:
+    s = self.settings
+    images, _ = await self.camera.get_images()
+    properties = await self.camera.get_properties()
+    intr = properties.intrinsic_parameters
 
-        u, v, mask = detect_box_center(color_bgr, s.hsv_lower, s.hsv_upper, s.min_box_area)
-        if u is None:
-            return {"found": False, "reason": "no box-colored region found"}
+    color_bgr, depth_np = decode_color_and_depth(images)
+    if depth_np.shape[:2] != color_bgr.shape[:2]:
+        raise ValueError(
+            f"depth {depth_np.shape[:2]} not aligned to color "
+            f"{color_bgr.shape[:2]}; cannot deproject with color intrinsics"
+        )
 
-        z = sample_depth_in_mask(depth_np, mask)
-        if z is None:
-            return {"found": False, "reason": "no valid depth in box mask"}
+    u, v, mask = detect_box_center(color_bgr, s.hsv_lower, s.hsv_upper, s.min_box_area)
+    if u is None:
+        return {"found": False, "reason": "no box-colored region found"}
 
-        cx, cy, cz = deproject(u, v, z, intr)
-        world = await self._to_frame((cx, cy, cz), s.world_frame)
+    z = sample_depth_in_mask(depth_np, mask)
+    if z is None:
+        return {"found": False, "reason": "no valid depth in box mask"}
 
-        result = {
-            "found": True,
-            "u": int(u),
-            "v": int(v),
-            "depth_mm": float(z),
-            "camera_frame_xyz": {"x": float(cx), "y": float(cy), "z": float(cz)},
-            "world_pose": _pose_to_dict(world.pose),
+    cx, cy, cz = deproject(u, v, z, intr)
+    world = await self._to_frame((cx, cy, cz), s.world_frame)
+
+    result = {
+        "found": True,
+        "u": int(u),
+        "v": int(v),
+        "depth_mm": float(z),
+        "camera_frame_xyz": {"x": float(cx), "y": float(cy), "z": float(cz)},
+        "world_pose": _pose_to_dict(world.pose),
+    }
+
+    seam = find_seam_edges(
+        mask, (u, v), color_bgr, s.seam_dark_v_max, s.min_seam_len_px
+    )
+    if seam is not None:
+        top_px, bottom_px, angle_deg = seam
+        top_w = await self._endpoint_world(top_px, z, intr)
+        bottom_w = await self._endpoint_world(bottom_px, z, intr)
+        top_inset, bottom_inset = inset_endpoints(top_w, bottom_w, s.inset_mm)
+        result["seam"] = {
+            "top_px": [int(top_px[0]), int(top_px[1])],
+            "bottom_px": [int(bottom_px[0]), int(bottom_px[1])],
+            "angle_deg": float(angle_deg),
         }
+        result["cut_endpoints_world"] = {
+            "top": [float(c) for c in top_inset],
+            "bottom": [float(c) for c in bottom_inset],
+        }
+    return result
 
-        seam = find_seam_edges(mask, (u, v), color_bgr, s.seam_dark_v_max, s.min_seam_len_px)
-        if seam is not None:
-            top_px, bottom_px, angle_deg = seam
-            top_w = await self._endpoint_world(top_px, z, intr)
-            bottom_w = await self._endpoint_world(bottom_px, z, intr)
-            top_inset, bottom_inset = inset_endpoints(top_w, bottom_w, s.inset_mm)
-            result["seam"] = {
-                "top_px": [int(top_px[0]), int(top_px[1])],
-                "bottom_px": [int(bottom_px[0]), int(bottom_px[1])],
-                "angle_deg": float(angle_deg),
-            }
-            result["cut_endpoints_world"] = {
-                "top": [float(c) for c in top_inset],
-                "bottom": [float(c) for c in bottom_inset],
-            }
-        return result
 
-    async def _endpoint_world(self, px, z, intr):
-        ex, ey, ez = deproject(px[0], px[1], z, intr)
-        pif = await self._to_frame((ex, ey, ez), self.settings.world_frame)
-        return (pif.pose.x, pif.pose.y, pif.pose.z)
+async def _endpoint_world(self, px, z, intr):
+    ex, ey, ez = deproject(px[0], px[1], z, intr)
+    pif = await self._to_frame((ex, ey, ez), self.settings.world_frame)
+    return (pif.pose.x, pif.pose.y, pif.pose.z)
 
-    async def _to_frame(self, point_xyz, dest_frame):
-        """Transform a camera-frame point (mm) into dest_frame via the motion service."""
-        x, y, z = point_xyz
-        transform = Transform(
-            reference_frame="box_point",
-            pose_in_observer_frame=PoseInFrame(
-                reference_frame=self.settings.camera_frame,
-                pose=Pose(x=x, y=y, z=z, o_x=0, o_y=0, o_z=1, theta=0),
-            ),
-        )
-        return await self.motion.get_pose(
-            component_name="box_point",
-            destination_frame=dest_frame,
-            supplemental_transforms=[transform],
-        )
+
+async def _to_frame(self, point_xyz, dest_frame):
+    """Transform a camera-frame point (mm) into dest_frame via the motion service."""
+    x, y, z = point_xyz
+    transform = Transform(
+        reference_frame="box_point",
+        pose_in_observer_frame=PoseInFrame(
+            reference_frame=self.settings.camera_frame,
+            pose=Pose(x=x, y=y, z=z, o_x=0, o_y=0, o_z=1, theta=0),
+        ),
+    )
+    return await self.motion.get_pose(
+        component_name="box_point",
+        destination_frame=dest_frame,
+        supplemental_transforms=[transform],
+    )
 ```
 
 Add a module-level helper near the top of `control.py`:
@@ -1256,8 +1291,12 @@ Add a module-level helper near the top of `control.py`:
 ```python
 def _pose_to_dict(pose) -> dict:
     return {
-        "x": float(pose.x), "y": float(pose.y), "z": float(pose.z),
-        "o_x": float(pose.o_x), "o_y": float(pose.o_y), "o_z": float(pose.o_z),
+        "x": float(pose.x),
+        "y": float(pose.y),
+        "z": float(pose.z),
+        "o_x": float(pose.o_x),
+        "o_y": float(pose.o_y),
+        "o_z": float(pose.o_z),
         "theta": float(pose.theta),
     }
 ```
@@ -1288,6 +1327,7 @@ git commit -m "feat: implement do_command dispatch and find_center action"
 class _RecordingMotion(_FakeMotion):
     def __init__(self):
         self.moved = None
+
     async def move(self, component_name, destination, **kw):
         self.moved = (component_name, destination)
         return True
@@ -1301,7 +1341,7 @@ async def test_move_to_center_commands_move_to_world_center():
     assert out["found"] is True
     assert out["moved"] is True
     comp, dest = ctrl.motion.moved
-    assert comp == "tool"                      # tool_frame
+    assert comp == "tool"  # tool_frame
     assert dest.reference_frame == "world"
     # z pulled down by plunge_depth (default 4) from ~700
     assert dest.pose.z == pytest.approx(700.0 - 4.0, abs=1)
@@ -1315,10 +1355,12 @@ async def test_move_to_center_skips_move_when_not_found():
     blank = np.full((480, 640, 3), 128, dtype=np.uint8)
     ok, buf = cv2.imencode(".jpg", blank)
     depth = np.full((480, 640), 700, dtype=np.uint16)
-    ctrl.camera = _FakeCamera([
-        _NamedImage(CameraMimeType.JPEG, data=buf.tobytes()),
-        _NamedImage(CameraMimeType.VIAM_RAW_DEPTH, depth=depth),
-    ])
+    ctrl.camera = _FakeCamera(
+        [
+            _NamedImage(CameraMimeType.JPEG, data=buf.tobytes()),
+            _NamedImage(CameraMimeType.VIAM_RAW_DEPTH, depth=depth),
+        ]
+    )
     out = await ctrl.do_command({"command": "move_to_center"})
     assert out["found"] is False
     assert ctrl.motion.moved is None
@@ -1336,22 +1378,27 @@ Expected: FAIL — `move_to_center` not implemented / returns nothing useful.
 **Step 3: Implement `move_to_center`**
 
 ```python
-    async def move_to_center(self) -> Mapping[str, ValueTypes]:
-        result = await self.find_center()
-        if not result.get("found"):
-            return result
-        s = self.settings
-        w = result["world_pose"]
-        goal = PoseInFrame(
-            reference_frame=s.world_frame,
-            pose=Pose(
-                x=w["x"], y=w["y"], z=w["z"] - s.plunge_depth_mm,
-                o_x=0, o_y=0, o_z=-1, theta=0,
-            ),
-        )
-        await self.motion.move(component_name=s.tool_frame, destination=goal)
-        result["moved"] = True
+async def move_to_center(self) -> Mapping[str, ValueTypes]:
+    result = await self.find_center()
+    if not result.get("found"):
         return result
+    s = self.settings
+    w = result["world_pose"]
+    goal = PoseInFrame(
+        reference_frame=s.world_frame,
+        pose=Pose(
+            x=w["x"],
+            y=w["y"],
+            z=w["z"] - s.plunge_depth_mm,
+            o_x=0,
+            o_y=0,
+            o_z=-1,
+            theta=0,
+        ),
+    )
+    await self.motion.move(component_name=s.tool_frame, destination=goal)
+    result["moved"] = True
+    return result
 ```
 
 **Step 4: Run to verify pass**
@@ -1393,8 +1440,10 @@ class _FakeJointPositions:
 class _FakeArm:
     def __init__(self):
         self.joint_history = []
+
     async def get_joint_positions(self, **kw):
         return _FakeJointPositions([0, 0, 0, 0, 0, 0])
+
     async def move_to_joint_positions(self, positions, **kw):
         self.joint_history.append(list(positions.values))
 
@@ -1407,14 +1456,20 @@ class _FullCutMotion(_RecordingMotion):
             reference_frame="world",
             pose=_Pose(x=1, y=2, z=3, o_x=0, o_y=0, o_z=-1, theta=0),
         )
+
     async def move(self, component_name, destination, **kw):
         self.moves.append((component_name, destination, kw.get("constraints")))
         return True
-    async def get_pose(self, component_name, destination_frame, supplemental_transforms=None, **kw):
+
+    async def get_pose(
+        self, component_name, destination_frame, supplemental_transforms=None, **kw
+    ):
         if supplemental_transforms is None:
             # home-pose query for the arm
             return self._home
-        return await super().get_pose(component_name, destination_frame, supplemental_transforms)
+        return await super().get_pose(
+            component_name, destination_frame, supplemental_transforms
+        )
 
 
 @pytest.mark.asyncio
@@ -1425,7 +1480,10 @@ async def test_full_cut_runs_full_sequence():
     out = await ctrl.do_command({"command": "full_cut"})
     assert out["completed"] is True
     # twist to angle then back to 0
-    assert ctrl.arm.joint_history[0][ctrl.settings.twist_joint_index] == ctrl.settings.twist_angle_deg
+    assert (
+        ctrl.arm.joint_history[0][ctrl.settings.twist_joint_index]
+        == ctrl.settings.twist_angle_deg
+    )
     assert ctrl.arm.joint_history[-1][ctrl.settings.twist_joint_index] == 0
     # at least: move_to_center + plunge + lift + slice + lift + home
     assert len(ctrl.motion.moves) >= 5
@@ -1441,10 +1499,12 @@ async def test_full_cut_aborts_when_no_box():
     blank = np.full((480, 640, 3), 128, dtype=np.uint8)
     ok, buf = cv2.imencode(".jpg", blank)
     depth = np.full((480, 640), 700, dtype=np.uint16)
-    ctrl.camera = _FakeCamera([
-        _NamedImage(CameraMimeType.JPEG, data=buf.tobytes()),
-        _NamedImage(CameraMimeType.VIAM_RAW_DEPTH, depth=depth),
-    ])
+    ctrl.camera = _FakeCamera(
+        [
+            _NamedImage(CameraMimeType.JPEG, data=buf.tobytes()),
+            _NamedImage(CameraMimeType.VIAM_RAW_DEPTH, depth=depth),
+        ]
+    )
     out = await ctrl.do_command({"command": "full_cut"})
     assert out["found"] is False
     assert ctrl.arm.joint_history == []
@@ -1467,82 +1527,84 @@ from viam.proto.service.motion import LinearConstraint
 Then:
 
 ```python
-    async def full_cut(self) -> Mapping[str, ValueTypes]:
-        s = self.settings
-        # Capture the arm's home pose before moving so we can return to it.
-        home = await self.motion.get_pose(
-            component_name=s.arm_name, destination_frame=s.world_frame
-        )
+async def full_cut(self) -> Mapping[str, ValueTypes]:
+    s = self.settings
+    # Capture the arm's home pose before moving so we can return to it.
+    home = await self.motion.get_pose(
+        component_name=s.arm_name, destination_frame=s.world_frame
+    )
 
-        result = await self.move_to_center()
-        if not result.get("found"):
-            return result
-        if "cut_endpoints_world" not in result:
-            result["completed"] = False
-            result["reason"] = "no seam/cut endpoints detected; only moved to center"
-            return result
-
-        steps = ["move_to_center"]
-        top = result["cut_endpoints_world"]["top"]
-        bottom = result["cut_endpoints_world"]["bottom"]
-        w = result["world_pose"]
-
-        def down_pose(x, y, z):
-            return PoseInFrame(
-                reference_frame=s.world_frame,
-                pose=Pose(x=x, y=y, z=z, o_x=0, o_y=0, o_z=-1, theta=0),
-            )
-
-        # 1) plunge at the bottom inset endpoint
-        await self.motion.move(
-            component_name=s.tool_frame,
-            destination=down_pose(bottom[0], bottom[1], bottom[2] - s.slice_depth_mm),
-        )
-        steps.append("plunge_bottom")
-
-        # 2) lift
-        await self.motion.move(
-            component_name=s.tool_frame,
-            destination=down_pose(bottom[0], bottom[1], bottom[2] - s.slice_depth_mm + s.lift_mm),
-        )
-        steps.append("lift")
-
-        # 3) twist the wrist joint
-        joints = await self.arm.get_joint_positions()
-        joints.values[s.twist_joint_index] = s.twist_angle_deg
-        await self.arm.move_to_joint_positions(joints)
-        steps.append("twist")
-
-        # 4) linear-constrained slice to the top inset endpoint
-        await self.motion.move(
-            component_name=s.tool_frame,
-            destination=down_pose(top[0], top[1], bottom[2] - s.slice_depth_mm),
-            constraints=Constraints(
-                linear_constraint=[LinearConstraint(line_tolerance_mm=s.line_tolerance_mm)]
-            ),
-        )
-        steps.append("slice_top")
-
-        # 5) lift
-        await self.motion.move(
-            component_name=s.tool_frame,
-            destination=down_pose(top[0], top[1], bottom[2] - s.slice_depth_mm + s.lift_mm),
-        )
-        steps.append("lift")
-
-        # 6) untwist
-        joints = await self.arm.get_joint_positions()
-        joints.values[s.twist_joint_index] = 0
-        await self.arm.move_to_joint_positions(joints)
-        steps.append("untwist")
-
-        # 7) return the arm to its captured home pose
-        await self.motion.move(component_name=s.arm_name, destination=home)
-        steps.append("home")
-
-        result["completed"] = True
-        result["steps"] = steps
+    result = await self.move_to_center()
+    if not result.get("found"):
         return result
+    if "cut_endpoints_world" not in result:
+        result["completed"] = False
+        result["reason"] = "no seam/cut endpoints detected; only moved to center"
+        return result
+
+    steps = ["move_to_center"]
+    top = result["cut_endpoints_world"]["top"]
+    bottom = result["cut_endpoints_world"]["bottom"]
+    w = result["world_pose"]
+
+    def down_pose(x, y, z):
+        return PoseInFrame(
+            reference_frame=s.world_frame,
+            pose=Pose(x=x, y=y, z=z, o_x=0, o_y=0, o_z=-1, theta=0),
+        )
+
+    # 1) plunge at the bottom inset endpoint
+    await self.motion.move(
+        component_name=s.tool_frame,
+        destination=down_pose(bottom[0], bottom[1], bottom[2] - s.slice_depth_mm),
+    )
+    steps.append("plunge_bottom")
+
+    # 2) lift
+    await self.motion.move(
+        component_name=s.tool_frame,
+        destination=down_pose(
+            bottom[0], bottom[1], bottom[2] - s.slice_depth_mm + s.lift_mm
+        ),
+    )
+    steps.append("lift")
+
+    # 3) twist the wrist joint
+    joints = await self.arm.get_joint_positions()
+    joints.values[s.twist_joint_index] = s.twist_angle_deg
+    await self.arm.move_to_joint_positions(joints)
+    steps.append("twist")
+
+    # 4) linear-constrained slice to the top inset endpoint
+    await self.motion.move(
+        component_name=s.tool_frame,
+        destination=down_pose(top[0], top[1], bottom[2] - s.slice_depth_mm),
+        constraints=Constraints(
+            linear_constraint=[LinearConstraint(line_tolerance_mm=s.line_tolerance_mm)]
+        ),
+    )
+    steps.append("slice_top")
+
+    # 5) lift
+    await self.motion.move(
+        component_name=s.tool_frame,
+        destination=down_pose(top[0], top[1], bottom[2] - s.slice_depth_mm + s.lift_mm),
+    )
+    steps.append("lift")
+
+    # 6) untwist
+    joints = await self.arm.get_joint_positions()
+    joints.values[s.twist_joint_index] = 0
+    await self.arm.move_to_joint_positions(joints)
+    steps.append("untwist")
+
+    # 7) return the arm to its captured home pose
+    await self.motion.move(component_name=s.arm_name, destination=home)
+    steps.append("home")
+
+    result["completed"] = True
+    result["steps"] = steps
+    return result
 ```
 
 **Step 4: Run to verify pass**
