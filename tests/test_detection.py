@@ -3,7 +3,17 @@ import numpy as np
 import pytest
 from viam.media.video import CameraMimeType
 
-from models.detection import deproject
+from models.detection import (
+    decode_color_and_depth,
+    deproject,
+    detect_box_center,
+    find_seam_edges,
+    find_vertical_seam_line,
+    inset_endpoints,
+    invert_jacobian,
+    pixel_error_to_delta_mm,
+    sample_depth_in_mask,
+)
 
 
 class _Intr:
@@ -39,9 +49,6 @@ def test_deproject_uses_independent_y_and_focal_y():
     assert z_out == 1000.0
 
 
-from models.detection import inset_endpoints
-
-
 def test_inset_endpoints_pulls_inward():
     top, bottom = inset_endpoints((0.0, 0.0, 0.0), (100.0, 0.0, 0.0), inset_mm=10)
     assert top == pytest.approx((10.0, 0.0, 0.0))
@@ -54,9 +61,6 @@ def test_inset_endpoints_collapses_when_too_short():
     assert bottom == pytest.approx((5.0, 0.0, 0.0))
 
 
-from models.detection import sample_depth_in_mask
-
-
 def test_sample_depth_median_ignores_zeros():
     depth = np.array([[0, 1000], [2000, 3000]], dtype=np.uint16)
     mask = np.array([[255, 255], [255, 255]], dtype=np.uint8)
@@ -67,9 +71,6 @@ def test_sample_depth_returns_none_when_all_invalid():
     depth = np.zeros((2, 2), dtype=np.uint16)
     mask = np.full((2, 2), 255, dtype=np.uint8)
     assert sample_depth_in_mask(depth, mask) is None
-
-
-from models.detection import decode_color_and_depth
 
 
 class _FakeNamedImage:
@@ -118,9 +119,6 @@ def test_decode_raises_without_depth():
         decode_color_and_depth(images)
 
 
-from models.detection import detect_box_center
-
-
 def _tan_box_image(w=640, h=480, box=(220, 160, 200, 160)):
     """Neutral-gray background with one solid tan (HSV ~20,150,200) rectangle."""
     bgr = np.full((h, w, 3), 128, dtype=np.uint8)
@@ -149,9 +147,6 @@ def test_detect_box_center_none_when_no_box_color():
     bgr = np.full((480, 640, 3), 128, dtype=np.uint8)
     cx, cy, mask = detect_box_center(bgr)
     assert cx is None and cy is None and mask is None
-
-
-from models.detection import find_seam_edges
 
 
 def test_find_seam_edges_returns_endpoints_along_dark_seam():
@@ -192,13 +187,6 @@ def test_find_seam_edges_falls_back_to_longer_axis_without_dark_seam():
     dx = abs(top_px[0] - bottom_px[0])
     dy = abs(top_px[1] - bottom_px[1])
     assert dx > dy
-
-
-from models.detection import (
-    find_vertical_seam_line,
-    invert_jacobian,
-    pixel_error_to_delta_mm,
-)
 
 
 def _frame_with_vertical_lines(*x_positions, height=(100, 400)):
