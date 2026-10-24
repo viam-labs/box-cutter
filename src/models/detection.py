@@ -9,7 +9,6 @@ from typing import Sequence
 
 import cv2
 import numpy as np
-
 from viam.media.video import CameraMimeType, NamedImage
 
 # --- Box detection tuning defaults (see design doc) ---------------------------

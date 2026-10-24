@@ -1,7 +1,6 @@
 import cv2
 import numpy as np
 import pytest
-
 from viam.media.video import CameraMimeType
 
 from models.detection import deproject

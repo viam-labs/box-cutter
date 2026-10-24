@@ -30,13 +30,9 @@ from viam.utils import ValueTypes
 from models.detection import (
     decode_color,
     deproject,
-    detect_box_center,
-    find_seam_edges,
     find_vertical_seam_line,
-    inset_endpoints,
     invert_jacobian,
     pixel_error_to_delta_mm,
-    sample_depth_in_mask,
 )
 
 SEAM_TOP = "top"

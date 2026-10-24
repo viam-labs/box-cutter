@@ -1,12 +1,12 @@
-import numpy as np
 import cv2
+import numpy as np
 import pytest
 from google.protobuf.struct_pb2 import Struct
+from viam.media.video import CameraMimeType
 from viam.proto.app.robot import ComponentConfig
 from viam.proto.common import Pose, PoseInFrame
-from viam.media.video import CameraMimeType
 
-from models.control import Control, Settings, SEAM_CLOSE, SEAM_FAR, SEAM_TOP
+from models.control import SEAM_CLOSE, SEAM_FAR, SEAM_TOP, Control, Settings
 
 
 def _config(attrs):
